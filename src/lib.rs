@@ -1,15 +1,8 @@
+pub mod audio;
+pub mod core;
+pub mod demux;
+pub mod source;
+pub mod video;
 
-mod error;
-mod player;
-mod backend;
-
-pub use error::{OpenWaveError, Result};
-pub use player::{MediaInfo, Player, PlayerState};
-
-/// Version of the libopenwave public API.
-pub const API_VERSION: &str = env!("CARGO_PKG_VERSION");
-
-/// Returns the libopenwave version.
-pub fn version() -> &'static str {
-    API_VERSION
-}
+pub use demux::wav::{WavError, WavFile, WavInfo};
+pub use source::{MediaSource, open_file};
