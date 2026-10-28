@@ -3,12 +3,13 @@ name = "libopenwave"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-description = "A media engine implemented in Rust"
+description = "A media engine implemented from scratch in Rust"
 
 [lib]
 name = "openwave"
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]
+cpal = "0.16"
 
 [dev-dependencies]
