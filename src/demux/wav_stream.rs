@@ -154,13 +154,11 @@ impl WavStreamReader {
 
         let byte_offset = frame
             .checked_mul(self.info.block_align as u64)
-            .and_then(|n| self.data_offset.checked_add(n))
+            .and_then(|offset| self.data_offset.checked_add(offset))
             .ok_or_else(|| io::Error::other("Seek offset overflow"))?;
 
         self.file.seek(SeekFrom::Start(byte_offset))?;
         self.bytes_read = frame * self.info.block_align as u64;
-        self.raw_buffer.clear();
-
         Ok(())
     }
 
@@ -254,6 +252,10 @@ mod tests {
         assert_eq!(all_samples.len(), 4);
         assert!(all_samples[1] > 0.99);
         assert!(all_samples[2] <= -0.99);
+
+        reader.seek_frame(1).unwrap();
+        assert_eq!(reader.read_frames(1).unwrap(), [all_samples[1]]);
+        assert!(reader.seek_frame(reader.total_frames() + 1).is_err());
 
         let _ = fs::remove_file(&path);
     }
