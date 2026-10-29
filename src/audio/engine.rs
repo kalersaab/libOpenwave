@@ -294,7 +294,6 @@ impl AudioEngine {
 
                 let requested_generation = worker_generation.load(Ordering::Acquire);
 
-                // A seek invalidates both the previous resampler and queued output.
                 if requested_generation != current_generation {
                     let target_output = worker_target.load(Ordering::Relaxed).min(duration_frames);
 
@@ -337,7 +336,6 @@ impl AudioEngine {
                     }
                 }
 
-                // Wait for a new seek after EOF instead of repeatedly reading EOF.
                 if worker_finished.load(Ordering::Acquire) == current_generation {
                     thread::sleep(Duration::from_millis(2));
                     continue;
@@ -358,7 +356,6 @@ impl AudioEngine {
                     }
                 };
 
-                // EOF: flush the interpolation tail before signalling completion.
                 if input.is_empty() {
                     let tail = match resampler.as_mut() {
                         Some(value) => value.finish(),
@@ -394,7 +391,6 @@ impl AudioEngine {
                     continue;
                 }
 
-                // The output duration is authoritative for the public playback timeline.
                 if output_index >= duration_frames {
                     worker_finished.store(current_generation, Ordering::Release);
                 }
@@ -415,7 +411,6 @@ impl AudioEngine {
     }
 
     pub fn play(&self) {
-        // Stopped and Ended are terminal for this instance.
         start_playback(&self.state);
     }
 
