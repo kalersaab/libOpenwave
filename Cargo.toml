@@ -11,5 +11,6 @@ crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 cpal = "0.16"
+ringbuf = "0.4"
 
 [dev-dependencies]

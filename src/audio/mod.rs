@@ -1,5 +1,8 @@
 use std::error::Error;
 use std::fmt;
+pub mod engine;
+pub mod resampler;
+pub mod ring_buffer;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PcmFormat {
@@ -45,25 +48,28 @@ pub fn decode_integer_pcm(bytes: &[u8], bits_per_sample: u16) -> Result<Vec<f32>
             .collect()),
 
         16 => {
-            if bytes.len() % 2 != 0 {
+            let (samples, remainder) = bytes.as_chunks::<2>();
+            if !remainder.is_empty() {
                 return Err(PcmError::InvalidFrameAlignment);
             }
 
-            Ok(bytes
-                .chunks_exact(2)
-                .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0)
+            Ok(samples
+                .iter()
+                .map(|sample| i16::from_le_bytes(*sample) as f32 / 32768.0)
                 .collect())
         }
 
         24 => {
-            if bytes.len() % 3 != 0 {
+            let (samples, remainder) = bytes.as_chunks::<3>();
+            if !remainder.is_empty() {
                 return Err(PcmError::InvalidFrameAlignment);
             }
 
-            Ok(bytes
-                .chunks_exact(3)
-                .map(|b| {
-                    let raw = (b[0] as i32) | ((b[1] as i32) << 8) | ((b[2] as i32) << 16);
+            Ok(samples
+                .iter()
+                .map(|sample| {
+                    let raw =
+                        (sample[0] as i32) | ((sample[1] as i32) << 8) | ((sample[2] as i32) << 16);
 
                     let signed = if raw & 0x80_0000 != 0 {
                         raw | !0xFF_FFFF
@@ -77,13 +83,14 @@ pub fn decode_integer_pcm(bytes: &[u8], bits_per_sample: u16) -> Result<Vec<f32>
         }
 
         32 => {
-            if bytes.len() % 4 != 0 {
+            let (samples, remainder) = bytes.as_chunks::<4>();
+            if !remainder.is_empty() {
                 return Err(PcmError::InvalidFrameAlignment);
             }
 
-            Ok(bytes
-                .chunks_exact(4)
-                .map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f32 / 2_147_483_648.0)
+            Ok(samples
+                .iter()
+                .map(|sample| i32::from_le_bytes(*sample) as f32 / 2_147_483_648.0)
                 .collect())
         }
 
