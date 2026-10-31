@@ -36,7 +36,6 @@ pub enum Residual4x4Kind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Residual4x4 {
-    /// Quantized coefficient levels in raster order.
     pub coeff_levels: [i32; 16],
 }
 
@@ -437,8 +436,6 @@ fn decode_coeff_token_fixed(
     Err(CavlcError::InvalidCode)
 }
 
-/// Decodes `coeff_token`; `None` represents an unavailable neighbor count.
-/// `max_num_coeff` selects the special 4- or 8-coefficient chroma DC table.
 pub fn decode_coeff_token(
     reader: &mut BitReader<'_>,
     n_c: Option<u32>,
@@ -471,7 +468,6 @@ pub fn decode_coeff_token(
     decode_coeff_token_from_rows(reader, table, max_num_coeff)
 }
 
-/// Decodes `total_zeros` for a block with the given coefficient capacity.
 pub fn decode_total_zeros(
     reader: &mut BitReader<'_>,
     total_coeff: u8,
@@ -500,7 +496,6 @@ pub fn decode_total_zeros(
     Ok(total_zeros)
 }
 
-/// Decodes `run_before` using the current number of zero coefficients left.
 pub fn decode_run_before(reader: &mut BitReader<'_>, zeros_left: u8) -> Result<u8, CavlcError> {
     if zeros_left == 0 {
         return Ok(0);
@@ -546,7 +541,6 @@ fn decode_level(reader: &mut BitReader<'_>, suffix_length: u8) -> Result<u32, Ca
     u32::try_from(level_code).map_err(|_| CavlcError::InvalidCode)
 }
 
-/// Decodes coefficient levels in bitstream order (highest scan position first).
 pub fn decode_levels(
     reader: &mut BitReader<'_>,
     token: CoeffToken,

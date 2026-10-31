@@ -223,7 +223,6 @@ pub fn parse_sps(nal: &[u8]) -> Result<Sps, SpsError> {
         crop_bottom = read_ue(&mut reader)?;
     }
 
-    // The VUI flag follows the crop fields. VUI parsing is a separate step.
     let _vui_parameters_present = read_flag(&mut reader)?;
 
     let chroma_array_type = if separate_colour_plane {
@@ -234,9 +233,9 @@ pub fn parse_sps(nal: &[u8]) -> Result<Sps, SpsError> {
 
     let (sub_width, sub_height) = match chroma_array_type {
         0 => (1u32, 1u32),
-        1 => (2, 2), // 4:2:0
-        2 => (2, 1), // 4:2:2
-        3 => (1, 1), // 4:4:4
+        1 => (2, 2),
+        2 => (2, 1),
+        3 => (1, 1),
         _ => return Err(SpsError::InvalidParameter),
     };
 
@@ -340,7 +339,6 @@ mod tests {
         }
 
         fn finish(mut self) -> Vec<u8> {
-            // rbsp_stop_one_bit followed by alignment zero bits.
             self.bit(true);
 
             while self.bit_pos != 0 {

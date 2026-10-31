@@ -85,7 +85,6 @@ fn skip_slice_groups(
         return Ok((None, 0));
     }
 
-    // Defensive bound for malformed streams.
     if groups_minus1 > 7 {
         return Err(PpsError::InvalidParameter);
     }
@@ -94,16 +93,12 @@ fn skip_slice_groups(
     let mut change_rate = 0;
     match map_type {
         0 => {
-            // run_length_minus1[i]
             for _ in 0..=groups_minus1 {
                 let _run_length_minus1 = ue(r)?;
             }
         }
-        1 => {
-            // Dispersed map: no additional syntax.
-        }
+        1 => {}
         2 => {
-            // top_left[i], bottom_right[i]
             for _ in 0..groups_minus1 {
                 let _top_left = ue(r)?;
                 let _bottom_right = ue(r)?;
@@ -137,9 +132,6 @@ fn skip_slice_groups(
     Ok((Some(map_type), change_rate))
 }
 
-// `nal` includes the one-byte NAL header.
-// This initial parser handles the base PPS syntax. Optional PPS extensions
-// and scaling matrices are deliberately left for the next iteration.
 pub fn parse_pps(nal: &[u8]) -> Result<Pps, PpsError> {
     let header = *nal.first().ok_or(PpsError::InvalidNalType)?;
 

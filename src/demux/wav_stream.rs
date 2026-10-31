@@ -104,7 +104,6 @@ impl WavStreamReader {
                 data = Some((chunk_data_start, chunk_size));
             }
 
-            // WAV chunks are padded to an even byte boundary.
             offset = chunk_end + (chunk_size & 1);
 
             if format.is_some() && data.is_some() {
@@ -207,8 +206,8 @@ mod tests {
 
         wav.extend_from_slice(b"fmt ");
         wav.extend_from_slice(&16u32.to_le_bytes());
-        wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
-        wav.extend_from_slice(&1u16.to_le_bytes()); // mono
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
         wav.extend_from_slice(&8000u32.to_le_bytes());
         wav.extend_from_slice(&16000u32.to_le_bytes());
         wav.extend_from_slice(&2u16.to_le_bytes());

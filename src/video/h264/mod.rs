@@ -1,11 +1,16 @@
+pub mod bslice;
 pub mod cavlc;
 pub mod decoder;
+pub mod dpb;
 pub mod frame;
 pub mod intra;
 pub mod macroblock;
 pub mod motion;
 pub mod nal;
+pub mod poc;
 pub mod pps;
+pub mod reference;
 pub mod slice;
 pub mod sps;
 pub mod transform;
+pub mod weighted;

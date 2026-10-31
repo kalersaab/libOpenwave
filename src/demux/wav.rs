@@ -140,7 +140,6 @@ fn parse_wav(bytes: &[u8]) -> Result<WavInfo, WavError> {
             data = Some((start, size));
         }
 
-        // RIFF chunks are word-aligned. Odd-sized chunks have one pad byte.
         cursor = end.checked_add(size & 1).ok_or(WavError::InvalidChunk)?;
     }
 

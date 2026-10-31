@@ -31,6 +31,7 @@ pub enum H264DecodeError {
     MissingParameterSet,
     MissingIdrSlice,
     MultipleSlicesUnsupported,
+    InvalidReferenceIndex { index: u32, list_length: usize },
     UnsupportedFeature,
     InvalidStream,
 }
@@ -64,6 +65,213 @@ from_error!(IntraPredictionError, Prediction);
 from_error!(MacroblockParseError, Macroblock);
 from_error!(FrameError, Frame);
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferencePicture {
+    pub frame_num: u32,
+    pub pic_order_cnt: i64,
+    pub long_term_frame_idx: Option<u32>,
+    pub frame: Yuv420Frame,
+}
+
+#[derive(Default)]
+struct ReferencePictureBuffer {
+    pictures: Vec<ReferencePicture>,
+}
+
+impl ReferencePictureBuffer {
+    fn clear(&mut self) {
+        self.pictures.clear();
+    }
+
+    fn pictures(&self) -> &[ReferencePicture] {
+        &self.pictures
+    }
+
+    fn insert(
+        &mut self,
+        picture: ReferencePicture,
+        max_num_ref_frames: u32,
+        current_frame_num: u32,
+        max_frame_num: u32,
+    ) -> Result<(), H264DecodeError> {
+        let capacity =
+            usize::try_from(max_num_ref_frames).map_err(|_| H264DecodeError::InvalidStream)?;
+        if capacity == 0 {
+            return Ok(());
+        }
+
+        while self.pictures.len() >= capacity {
+            let oldest_short_term = self
+                .pictures
+                .iter()
+                .enumerate()
+                .filter(|(_, picture)| picture.long_term_frame_idx.is_none())
+                .min_by_key(|(_, picture)| {
+                    frame_num_wrap(picture.frame_num, current_frame_num, max_frame_num)
+                })
+                .map(|(index, _)| index);
+            let Some(index) = oldest_short_term else {
+                return Err(H264DecodeError::InvalidStream);
+            };
+            self.pictures.remove(index);
+        }
+        self.pictures.push(picture);
+        Ok(())
+    }
+}
+
+struct ReferencePictureLists<'a> {
+    list0: Vec<&'a ReferencePicture>,
+    list1: Vec<&'a ReferencePicture>,
+}
+
+struct ReferencePictureListConfig {
+    slice_type: SliceType,
+    current_frame_num: u32,
+    max_frame_num: u32,
+    current_pic_order_cnt: i64,
+    max_pic_order_cnt: Option<i64>,
+    list0_count: u32,
+    list1_count: u32,
+}
+
+impl<'a> ReferencePictureLists<'a> {
+    fn build(
+        pictures: &'a [ReferencePicture],
+        config: ReferencePictureListConfig,
+    ) -> Result<Self, H264DecodeError> {
+        let mut short_term = pictures
+            .iter()
+            .filter(|picture| picture.long_term_frame_idx.is_none())
+            .collect::<Vec<_>>();
+        let mut long_term = pictures
+            .iter()
+            .filter(|picture| picture.long_term_frame_idx.is_some())
+            .collect::<Vec<_>>();
+        long_term.sort_by_key(|picture| picture.long_term_frame_idx);
+
+        let (mut list0, mut list1) = match config.slice_type {
+            SliceType::P => {
+                short_term.sort_by_key(|picture| {
+                    std::cmp::Reverse(frame_num_wrap(
+                        picture.frame_num,
+                        config.current_frame_num,
+                        config.max_frame_num,
+                    ))
+                });
+                let mut list0 = short_term;
+                list0.extend(long_term);
+                (list0, Vec::new())
+            }
+            SliceType::B => {
+                let mut before = Vec::new();
+                let mut after = Vec::new();
+                for picture in short_term {
+                    let order = unwrap_pic_order_cnt(
+                        picture.pic_order_cnt,
+                        config.current_pic_order_cnt,
+                        config.max_pic_order_cnt,
+                    );
+                    if order < config.current_pic_order_cnt {
+                        before.push((order, picture));
+                    } else {
+                        after.push((order, picture));
+                    }
+                }
+                before.sort_by_key(|(order, _)| std::cmp::Reverse(*order));
+                after.sort_by_key(|(order, _)| *order);
+                let mut list0 = before
+                    .iter()
+                    .chain(after.iter())
+                    .map(|(_, picture)| *picture)
+                    .collect::<Vec<_>>();
+                let mut list1 = after
+                    .iter()
+                    .chain(before.iter())
+                    .map(|(_, picture)| *picture)
+                    .collect::<Vec<_>>();
+                list0.extend(long_term.iter().copied());
+                list1.extend(long_term);
+                if list0.len() > 1
+                    && list0.len() == list1.len()
+                    && list0
+                        .iter()
+                        .zip(&list1)
+                        .all(|(left, right)| std::ptr::eq(*left, *right))
+                {
+                    list1.swap(0, 1);
+                }
+                (list0, list1)
+            }
+            _ => (Vec::new(), Vec::new()),
+        };
+
+        list0.truncate(
+            usize::try_from(config.list0_count).map_err(|_| H264DecodeError::InvalidStream)?,
+        );
+        list1.truncate(
+            usize::try_from(config.list1_count).map_err(|_| H264DecodeError::InvalidStream)?,
+        );
+        validate_reference_list_length(config.list0_count, list0.len())?;
+        if config.slice_type == SliceType::B {
+            validate_reference_list_length(config.list1_count, list1.len())?;
+        }
+
+        Ok(Self { list0, list1 })
+    }
+}
+
+fn validate_reference_list_length(
+    active_count: u32,
+    list_length: usize,
+) -> Result<(), H264DecodeError> {
+    let active_count = usize::try_from(active_count).map_err(|_| H264DecodeError::InvalidStream)?;
+    if active_count > list_length {
+        return Err(H264DecodeError::InvalidReferenceIndex {
+            index: u32::try_from(list_length).unwrap_or(u32::MAX),
+            list_length,
+        });
+    }
+    Ok(())
+}
+
+fn frame_num_wrap(frame_num: u32, current_frame_num: u32, max_frame_num: u32) -> i64 {
+    if frame_num > current_frame_num {
+        i64::from(frame_num) - i64::from(max_frame_num)
+    } else {
+        i64::from(frame_num)
+    }
+}
+
+fn unwrap_pic_order_cnt(
+    reference_pic_order_cnt: i64,
+    current_pic_order_cnt: i64,
+    max_pic_order_cnt: Option<i64>,
+) -> i64 {
+    let Some(max_pic_order_cnt) = max_pic_order_cnt else {
+        return reference_pic_order_cnt;
+    };
+    let mut difference =
+        (reference_pic_order_cnt - current_pic_order_cnt).rem_euclid(max_pic_order_cnt);
+    if difference >= max_pic_order_cnt / 2 {
+        difference -= max_pic_order_cnt;
+    }
+    current_pic_order_cnt + difference
+}
+
+fn reference_picture<'a>(
+    list: &'a [&ReferencePicture],
+    reference_index: u32,
+) -> Result<&'a ReferencePicture, H264DecodeError> {
+    let index = usize::try_from(reference_index).map_err(|_| H264DecodeError::InvalidStream)?;
+    list.get(index)
+        .copied()
+        .ok_or(H264DecodeError::InvalidReferenceIndex {
+            index: reference_index,
+            list_length: list.len(),
+        })
+}
+
 pub fn decode_annex_b(data: &[u8]) -> Result<Yuv420Frame, H264DecodeError> {
     decode_annex_b_frames(data)?
         .into_iter()
@@ -75,7 +283,7 @@ pub fn decode_annex_b_frames(data: &[u8]) -> Result<Vec<Yuv420Frame>, H264Decode
     let units = parse_annex_b(data)?;
     let mut sequence_parameter_sets = HashMap::<u32, Sps>::new();
     let mut picture_parameter_sets = HashMap::<u32, Pps>::new();
-    let mut reference_frames = Vec::<Yuv420Frame>::new();
+    let mut reference_pictures = ReferencePictureBuffer::default();
     let mut decoded_frames = Vec::<Yuv420Frame>::new();
 
     for unit in &units {
@@ -104,23 +312,67 @@ pub fn decode_annex_b_frames(data: &[u8]) -> Result<Vec<Yuv420Frame>, H264Decode
                 reader.skip_bits(header.slice_data_bit_offset)?;
 
                 if prefix.is_idr {
-                    reference_frames.clear();
+                    reference_pictures.clear();
                 }
+                let max_frame_num = 1u32
+                    .checked_shl(sps.log2_max_frame_num)
+                    .ok_or(H264DecodeError::InvalidStream)?;
+                let current_pic_order_cnt =
+                    i64::from(header.pic_order_cnt_lsb.unwrap_or(header.frame_num));
+                let max_pic_order_cnt = if sps.pic_order_cnt_type == 0 {
+                    Some(
+                        1i64.checked_shl(sps.log2_max_pic_order_cnt_lsb)
+                            .ok_or(H264DecodeError::InvalidStream)?,
+                    )
+                } else {
+                    None
+                };
+                let (list0_count, list1_count) =
+                    if matches!(header.prefix.slice_type, SliceType::P | SliceType::B) {
+                        (header.num_ref_idx_l0_active, header.num_ref_idx_l1_active)
+                    } else {
+                        (0, 0)
+                    };
+                let reference_lists = ReferencePictureLists::build(
+                    reference_pictures.pictures(),
+                    ReferencePictureListConfig {
+                        slice_type: header.prefix.slice_type,
+                        current_frame_num: header.frame_num,
+                        max_frame_num,
+                        current_pic_order_cnt,
+                        max_pic_order_cnt,
+                        list0_count,
+                        list1_count,
+                    },
+                )?;
                 let frame = match header.prefix.slice_type {
                     SliceType::I if prefix.is_idr => {
                         reconstruct_slice(&mut reader, sps, pps, &header)?
                     }
                     SliceType::P | SliceType::B if !prefix.is_idr => {
-                        reconstruct_inter_slice(&mut reader, sps, &header, &reference_frames)?
+                        reconstruct_inter_slice(&mut reader, sps, &header, &reference_lists)?
                     }
                     _ => return Err(H264DecodeError::UnsupportedFeature),
                 };
 
                 if unit.header.nal_ref_idc != 0 {
-                    reference_frames.push(copy_frame(&frame)?);
-                    if reference_frames.len() > 2 {
-                        reference_frames.remove(0);
-                    }
+                    let long_term_frame_idx = header
+                        .dec_ref_pic_marking
+                        .as_ref()
+                        .and_then(|marking| marking.long_term_reference_flag)
+                        .filter(|&is_long_term| prefix.is_idr && is_long_term)
+                        .map(|_| 0);
+                    reference_pictures.insert(
+                        ReferencePicture {
+                            frame_num: header.frame_num,
+                            pic_order_cnt: current_pic_order_cnt,
+                            long_term_frame_idx,
+                            frame: copy_frame(&frame)?,
+                        },
+                        sps.max_num_ref_frames,
+                        header.frame_num,
+                        max_frame_num,
+                    )?;
                 }
                 decoded_frames.push(frame);
             }
@@ -167,9 +419,7 @@ fn validate_decoder_configuration(
     };
     let inter_header_supported = match header.prefix.slice_type {
         SliceType::P => {
-            header.num_ref_idx_l0_active == 1
-                && header.ref_pic_list_modification_l0.is_empty()
-                && header.pred_weight_table.is_none()
+            header.ref_pic_list_modification_l0.is_empty() && header.pred_weight_table.is_none()
         }
         SliceType::B => {
             header.num_ref_idx_l0_active == 1
@@ -376,7 +626,7 @@ fn reconstruct_inter_slice(
     reader: &mut BitReader<'_>,
     sps: &Sps,
     header: &crate::video::h264::slice::SliceHeader,
-    reference_frames: &[Yuv420Frame],
+    reference_lists: &ReferencePictureLists<'_>,
 ) -> Result<Yuv420Frame, H264DecodeError> {
     let macroblock_count = sps
         .pic_width_in_mbs
@@ -407,8 +657,14 @@ fn reconstruct_inter_slice(
                     } else {
                         motion
                     };
-                    let reference = reference_frame(reference_frames, 0)?;
-                    motion_compensate_macroblock(&mut frame, reference, mb_x, mb_y, skip_motion)?;
+                    let reference = reference_picture(&reference_lists.list0, 0)?;
+                    motion_compensate_macroblock(
+                        &mut frame,
+                        &reference.frame,
+                        mb_x,
+                        mb_y,
+                        skip_motion,
+                    )?;
                     motion_grid.set_macroblock(mb_x, mb_y, 0, skip_motion);
                     address += 1;
                 }
@@ -436,8 +692,14 @@ fn reconstruct_inter_slice(
                                 .checked_add(motion_vector_difference[1])
                                 .ok_or(H264DecodeError::InvalidStream)?,
                         };
-                        let reference = reference_frame(reference_frames, reference_index)?;
-                        motion_compensate_macroblock(&mut frame, reference, mb_x, mb_y, motion)?;
+                        let reference = reference_picture(&reference_lists.list0, reference_index)?;
+                        motion_compensate_macroblock(
+                            &mut frame,
+                            &reference.frame,
+                            mb_x,
+                            mb_y,
+                            motion,
+                        )?;
                         motion_grid.set_macroblock(mb_x, mb_y, reference_index, motion);
                     }
                     _ => return Err(H264DecodeError::UnsupportedFeature),
@@ -454,11 +716,9 @@ fn reconstruct_inter_slice(
                 return Err(H264DecodeError::UnsupportedFeature);
             }
             consume_rbsp_trailing_bits(reader)?;
-            if reference_frames.len() >= 2 {
-                average_frames(&reference_frames[reference_frames.len() - 2..])
-            } else {
-                Err(H264DecodeError::UnsupportedFeature)
-            }
+            let first = reference_picture(&reference_lists.list0, 0)?;
+            let second = reference_picture(&reference_lists.list1, 0)?;
+            average_frames(&first.frame, &second.frame)
         }
         _ => Err(H264DecodeError::UnsupportedFeature),
     }
@@ -553,18 +813,6 @@ impl MotionGrid {
             }
         }
     }
-}
-
-fn reference_frame(
-    references: &[Yuv420Frame],
-    reference_index: u32,
-) -> Result<&Yuv420Frame, H264DecodeError> {
-    let offset = usize::try_from(reference_index).map_err(|_| H264DecodeError::InvalidStream)?;
-    references
-        .len()
-        .checked_sub(offset + 1)
-        .and_then(|index| references.get(index))
-        .ok_or(H264DecodeError::MissingIdrSlice)
 }
 
 fn motion_compensate_macroblock(
@@ -671,10 +919,10 @@ fn copy_frame(source: &Yuv420Frame) -> Result<Yuv420Frame, H264DecodeError> {
     Ok(frame)
 }
 
-fn average_frames(references: &[Yuv420Frame]) -> Result<Yuv420Frame, H264DecodeError> {
-    let [first, second] = references else {
-        return Err(H264DecodeError::InvalidStream);
-    };
+fn average_frames(
+    first: &Yuv420Frame,
+    second: &Yuv420Frame,
+) -> Result<Yuv420Frame, H264DecodeError> {
     if first.width != second.width || first.height != second.height {
         return Err(H264DecodeError::InvalidStream);
     }
@@ -854,7 +1102,7 @@ mod tests {
     use super::*;
 
     const IDR_STREAM: &[u8] = include_bytes!("../../../tests/fixtures/h264/gray_idr_16x16.h264");
-    // Decoded by FFmpeg from the checked-in elementary stream.
+
     const REFERENCE_YUV: &[u8] =
         include_bytes!("../../../tests/fixtures/h264/gray_idr_16x16.reference.yuv");
     const P_B_STREAM: &[u8] =
@@ -865,6 +1113,119 @@ mod tests {
         include_bytes!("../../../tests/fixtures/h264/gray_p16x16_base_32x16.h264");
     const P16_REFERENCE_YUV: &[u8] =
         include_bytes!("../../../tests/fixtures/h264/gray_p16x16_base_32x16.reference.yuv");
+
+    fn make_reference_picture(frame_num: u32, pic_order_cnt: i64) -> ReferencePicture {
+        ReferencePicture {
+            frame_num,
+            pic_order_cnt,
+            long_term_frame_idx: None,
+            frame: Yuv420Frame::new(16, 16).unwrap(),
+        }
+    }
+
+    #[test]
+    fn builds_p_and_b_reference_lists_in_picture_order() {
+        let pictures = [
+            make_reference_picture(15, 2),
+            make_reference_picture(14, 6),
+            make_reference_picture(13, 9),
+        ];
+
+        let p_lists = ReferencePictureLists::build(
+            &pictures,
+            ReferencePictureListConfig {
+                slice_type: SliceType::P,
+                current_frame_num: 0,
+                max_frame_num: 16,
+                current_pic_order_cnt: 0,
+                max_pic_order_cnt: Some(16),
+                list0_count: 3,
+                list1_count: 0,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            p_lists
+                .list0
+                .iter()
+                .map(|picture| picture.frame_num)
+                .collect::<Vec<_>>(),
+            [15, 14, 13]
+        );
+
+        let b_lists = ReferencePictureLists::build(
+            &pictures,
+            ReferencePictureListConfig {
+                slice_type: SliceType::B,
+                current_frame_num: 0,
+                max_frame_num: 16,
+                current_pic_order_cnt: 4,
+                max_pic_order_cnt: Some(16),
+                list0_count: 3,
+                list1_count: 3,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            b_lists
+                .list0
+                .iter()
+                .map(|picture| picture.pic_order_cnt)
+                .collect::<Vec<_>>(),
+            [2, 6, 9]
+        );
+        assert_eq!(
+            b_lists
+                .list1
+                .iter()
+                .map(|picture| picture.pic_order_cnt)
+                .collect::<Vec<_>>(),
+            [6, 9, 2]
+        );
+    }
+
+    #[test]
+    fn validates_reference_indices_and_evicts_oldest_short_term_picture() {
+        let mut buffer = ReferencePictureBuffer::default();
+        buffer
+            .insert(make_reference_picture(14, 0), 2, 14, 16)
+            .unwrap();
+        buffer
+            .insert(make_reference_picture(15, 1), 2, 15, 16)
+            .unwrap();
+        buffer
+            .insert(make_reference_picture(0, 2), 2, 0, 16)
+            .unwrap();
+        assert_eq!(
+            buffer
+                .pictures()
+                .iter()
+                .map(|picture| picture.frame_num)
+                .collect::<Vec<_>>(),
+            [15, 0]
+        );
+
+        let lists = ReferencePictureLists::build(
+            buffer.pictures(),
+            ReferencePictureListConfig {
+                slice_type: SliceType::P,
+                current_frame_num: 1,
+                max_frame_num: 16,
+                current_pic_order_cnt: 3,
+                max_pic_order_cnt: Some(16),
+                list0_count: 2,
+                list1_count: 0,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            reference_picture(&lists.list0, 2),
+            Err(H264DecodeError::InvalidReferenceIndex {
+                index: 2,
+                list_length: 2,
+            })
+        );
+    }
 
     #[test]
     fn decodes_real_baseline_idr_against_reference_frame() {
@@ -963,10 +1324,10 @@ mod tests {
 
             for mb in 0..2 {
                 push_ue(&mut bits, 0);
-                push_ue(&mut bits, 1);
+                push_ue(&mut bits, 0);
                 push_se(&mut bits, if mb == 0 { 0 } else { -64 });
                 push_se(&mut bits, 0);
-                push_ue(&mut bits, 3);
+                push_ue(&mut bits, 0);
             }
             bits.push(true);
             while bits.len() % 8 != 0 {
@@ -988,7 +1349,10 @@ mod tests {
                 for mb in 0..2 {
                     assert_eq!(rbsp_reader.read_ue().unwrap(), 0);
                     assert_eq!(
-                        parse_p_macroblock(&mut rbsp_reader, 1),
+                        crate::video::h264::macroblock::inter::parse_p_macroblock(
+                            &mut rbsp_reader,
+                            1
+                        ),
                         Ok(MacroblockType::P16x16 {
                             reference_index: 0,
                             motion_vector_difference: if mb == 0 { [0, 0] } else { [-64, 0] },

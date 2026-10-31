@@ -3,7 +3,6 @@ use crate::video::h264::{
     motion::interpolation::{interpolate_bilinear, plane_samples},
 };
 
-/// Interpolates one 4:2:0 chroma sample; motion coordinates use quarter-luma-pixel units.
 pub fn interpolate_chroma_sample(
     frame: &Yuv420Frame,
     plane: ColorPlane,

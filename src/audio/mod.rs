@@ -38,8 +38,6 @@ impl fmt::Display for PcmError {
 
 impl Error for PcmError {}
 
-/// Decode integer PCM WAV data to normalized f32 samples.
-/// Samples are interleaved by channel.
 pub fn decode_integer_pcm(bytes: &[u8], bits_per_sample: u16) -> Result<Vec<f32>, PcmError> {
     match bits_per_sample {
         8 => Ok(bytes
@@ -113,11 +111,7 @@ mod tests {
 
     #[test]
     fn decodes_signed_16_bit_pcm() {
-        let bytes = [
-            0x00, 0x80, // -32768
-            0x00, 0x00, // 0
-            0xFF, 0x7F, // 32767
-        ];
+        let bytes = [0x00, 0x80, 0x00, 0x00, 0xFF, 0x7F];
 
         let samples = decode_integer_pcm(&bytes, 16).unwrap();
 

@@ -28,17 +28,47 @@ pub enum MacroblockType {
         coded_chroma_pattern: u8,
         coded_luma_pattern: u8,
     },
+    Ipcm,
+
     P16x16 {
         reference_index: u32,
         motion_vector_difference: [i32; 2],
-        coded_block_pattern: u8,
+        coded_block_pattern: u32,
+    },
+    P16x8 {
+        reference_indices: [u32; 2],
+        motion_vector_differences: [[i32; 2]; 2],
+        coded_block_pattern: u32,
+    },
+    P8x16 {
+        reference_indices: [u32; 2],
+        motion_vector_differences: [[i32; 2]; 2],
+        coded_block_pattern: u32,
     },
     PSkip,
-    Ipcm,
+
+    BDirect16x16,
+    BL0_16x16 {
+        reference_index: u32,
+        motion_vector_difference: [i32; 2],
+        coded_block_pattern: u32,
+    },
+    BL1_16x16 {
+        reference_index: u32,
+        motion_vector_difference: [i32; 2],
+        coded_block_pattern: u32,
+    },
+    BBi16x16 {
+        reference_index_l0: u32,
+        motion_vector_difference_l0: [i32; 2],
+        reference_index_l1: u32,
+        motion_vector_difference_l1: [i32; 2],
+        coded_block_pattern: u32,
+    },
+    BSkip,
 }
 
 impl MacroblockType {
-    /// Maps mb_type values for an H.264 I-slice.
     pub fn from_i_slice_mb_type(value: u32) -> Option<Self> {
         match value {
             0 => Some(Self::Intra4x4),
