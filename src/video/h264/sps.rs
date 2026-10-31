@@ -35,6 +35,14 @@ pub struct Sps {
     pub bit_depth_chroma: u32,
     pub frame_mbs_only: bool,
     pub max_num_ref_frames: u32,
+    pub separate_colour_plane: bool,
+    pub log2_max_frame_num: u32,
+    pub pic_order_cnt_type: u32,
+    pub log2_max_pic_order_cnt_lsb: u32,
+    pub delta_pic_order_always_zero: bool,
+    pub mb_adaptive_frame_field: bool,
+    pub pic_width_in_mbs: u32,
+    pub pic_height_in_map_units: u32,
 }
 
 fn read_flag(reader: &mut BitReader<'_>) -> Result<bool, SpsError> {
@@ -71,7 +79,6 @@ fn is_high_profile(profile: u8) -> bool {
     )
 }
 
-// The NAL header is included in `nal`.
 pub fn parse_sps(nal: &[u8]) -> Result<Sps, SpsError> {
     let header = *nal.first().ok_or(SpsError::InvalidNalType)?;
 
@@ -79,7 +86,6 @@ pub fn parse_sps(nal: &[u8]) -> Result<Sps, SpsError> {
         return Err(SpsError::InvalidNalType);
     }
 
-    // Convert EBSP to RBSP by removing emulation-prevention bytes.
     let mut rbsp = Vec::with_capacity(nal.len().saturating_sub(1));
     let mut zero_count = 0usize;
 
@@ -154,17 +160,22 @@ pub fn parse_sps(nal: &[u8]) -> Result<Sps, SpsError> {
     if log2_max_frame_num_minus4 > 12 {
         return Err(SpsError::InvalidParameter);
     }
+    let log2_max_frame_num = log2_max_frame_num_minus4 + 4;
 
     let pic_order_cnt_type = read_ue(&mut reader)?;
+    let mut log2_max_pic_order_cnt_lsb = 0;
+    let mut delta_pic_order_always_zero = false;
 
     match pic_order_cnt_type {
         0 => {
-            if read_ue(&mut reader)? > 12 {
+            let log2_max_pic_order_cnt_lsb_minus4 = read_ue(&mut reader)?;
+            if log2_max_pic_order_cnt_lsb_minus4 > 12 {
                 return Err(SpsError::InvalidParameter);
             }
+            log2_max_pic_order_cnt_lsb = log2_max_pic_order_cnt_lsb_minus4 + 4;
         }
         1 => {
-            let _delta_pic_order_always_zero = read_flag(&mut reader)?;
+            delta_pic_order_always_zero = read_flag(&mut reader)?;
             let _offset_for_non_ref_pic = reader.read_se()?;
             let _offset_for_top_to_bottom_field = reader.read_se()?;
             let cycle = read_ue(&mut reader)?;
@@ -194,9 +205,11 @@ pub fn parse_sps(nal: &[u8]) -> Result<Sps, SpsError> {
 
     let frame_mbs_only = read_flag(&mut reader)?;
 
-    if !frame_mbs_only {
-        let _mb_adaptive_frame_field = read_flag(&mut reader)?;
-    }
+    let mb_adaptive_frame_field = if frame_mbs_only {
+        false
+    } else {
+        read_flag(&mut reader)?
+    };
 
     let _direct_8x8_inference = read_flag(&mut reader)?;
     let cropping = read_flag(&mut reader)?;
@@ -272,6 +285,14 @@ pub fn parse_sps(nal: &[u8]) -> Result<Sps, SpsError> {
         bit_depth_chroma,
         frame_mbs_only,
         max_num_ref_frames,
+        separate_colour_plane,
+        log2_max_frame_num,
+        pic_order_cnt_type,
+        log2_max_pic_order_cnt_lsb,
+        delta_pic_order_always_zero,
+        mb_adaptive_frame_field,
+        pic_width_in_mbs: width_mbs,
+        pic_height_in_map_units: height_map_units,
     })
 }
 
@@ -338,30 +359,30 @@ mod tests {
     ) -> Vec<u8> {
         let mut writer = BitWriter::new();
 
-        writer.ue(0); // seq_parameter_set_id
-        writer.ue(0); // log2_max_frame_num_minus4
-        writer.ue(0); // pic_order_cnt_type
-        writer.ue(0); // log2_max_pic_order_cnt_lsb_minus4
-        writer.ue(1); // max_num_ref_frames
-        writer.bit(false); // gaps_in_frame_num_value_allowed_flag
+        writer.ue(0);
+        writer.ue(0);
+        writer.ue(0);
+        writer.ue(0);
+        writer.ue(1);
+        writer.bit(false);
 
         writer.ue(width_mbs_minus1);
         writer.ue(height_map_units_minus1);
 
-        writer.bit(true); // frame_mbs_only_flag
-        writer.bit(true); // direct_8x8_inference_flag
+        writer.bit(true);
+        writer.bit(true);
 
         let cropping = crop_right != 0 || crop_bottom != 0;
         writer.bit(cropping);
 
         if cropping {
-            writer.ue(0); // frame_crop_left_offset
+            writer.ue(0);
             writer.ue(crop_right);
-            writer.ue(0); // frame_crop_top_offset
+            writer.ue(0);
             writer.ue(crop_bottom);
         }
 
-        writer.bit(false); // vui_parameters_present_flag
+        writer.bit(false);
 
         let mut nal = vec![0x67, 66, 0, 30];
         nal.extend(writer.finish());
@@ -381,6 +402,11 @@ mod tests {
         assert_eq!(sps.bit_depth_luma, 8);
         assert_eq!(sps.bit_depth_chroma, 8);
         assert!(sps.frame_mbs_only);
+        assert_eq!(sps.log2_max_frame_num, 4);
+        assert_eq!(sps.pic_order_cnt_type, 0);
+        assert_eq!(sps.log2_max_pic_order_cnt_lsb, 4);
+        assert_eq!(sps.pic_width_in_mbs, 40);
+        assert_eq!(sps.pic_height_in_map_units, 30);
     }
 
     #[test]
