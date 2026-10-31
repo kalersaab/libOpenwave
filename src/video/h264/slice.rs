@@ -340,8 +340,6 @@ fn parse_nal_header(nal: &[u8]) -> Result<(u8, u8), SliceError> {
     Ok(((header >> 5) & 0x03, nal_type))
 }
 
-/// Parses the full slice header for CAVLC streams using their active parameter sets.
-/// The returned header ends immediately before slice data.
 pub fn parse_slice_header(nal: &[u8], sps: &Sps, pps: &Pps) -> Result<SliceHeader, SliceError> {
     let (nal_ref_idc, nal_type) = parse_nal_header(nal)?;
     let is_idr = nal_type == 5;
@@ -698,7 +696,6 @@ mod tests {
         }
     }
 
-    // Encode unsigned Exp-Golomb values MSB-first.
     fn ue_bits(value: u32, out: &mut Vec<bool>) {
         let code = u64::from(value) + 1;
         let width = 64 - code.leading_zeros();
@@ -717,7 +714,6 @@ mod tests {
             ue_bits(value, &mut bits);
         }
 
-        // Add RBSP trailing bits.
         bits.push(true);
         while !bits.len().is_multiple_of(8) {
             bits.push(false);
@@ -778,16 +774,16 @@ mod tests {
     #[test]
     fn parses_idr_i_slice_header() {
         let mut writer = TestBitWriter::default();
-        writer.ue(0); // first_mb_in_slice
-        writer.ue(2); // I slice
-        writer.ue(0); // pic_parameter_set_id
-        writer.bits(4, 5); // frame_num
-        writer.ue(3); // idr_pic_id
-        writer.bits(4, 7); // pic_order_cnt_lsb
-        writer.bit(false); // no_output_of_prior_pics_flag
-        writer.bit(true); // long_term_reference_flag
-        writer.se(0); // slice_qp_delta
-        writer.ue(0); // disable_deblocking_filter_idc
+        writer.ue(0);
+        writer.ue(2);
+        writer.ue(0);
+        writer.bits(4, 5);
+        writer.ue(3);
+        writer.bits(4, 7);
+        writer.bit(false);
+        writer.bit(true);
+        writer.se(0);
+        writer.ue(0);
         writer.se(-1);
         writer.se(1);
         let nal = writer.finish(0x65);
@@ -823,35 +819,35 @@ mod tests {
         pps.weighted_pred = true;
 
         let mut writer = TestBitWriter::default();
-        writer.ue(0); // first_mb_in_slice
-        writer.ue(0); // P slice
-        writer.ue(0); // pic_parameter_set_id
-        writer.bits(4, 9); // frame_num
-        writer.bits(4, 3); // pic_order_cnt_lsb
-        writer.se(-2); // delta_pic_order_cnt_bottom
-        writer.ue(1); // redundant_pic_cnt
-        writer.bit(true); // num_ref_idx_active_override_flag
-        writer.ue(0); // num_ref_idx_l0_active_minus1
-        writer.bit(true); // ref_pic_list_modification_flag_l0
-        writer.ue(0); // subtract short-term pic_num
-        writer.ue(3); // abs_diff_pic_num_minus1
-        writer.ue(3); // modification_of_pic_nums_idc terminator
-        writer.ue(1); // luma_log2_weight_denom
-        writer.ue(2); // chroma_log2_weight_denom
-        writer.bit(true); // luma_weight_l0_flag
+        writer.ue(0);
+        writer.ue(0);
+        writer.ue(0);
+        writer.bits(4, 9);
+        writer.bits(4, 3);
+        writer.se(-2);
+        writer.ue(1);
+        writer.bit(true);
+        writer.ue(0);
+        writer.bit(true);
+        writer.ue(0);
+        writer.ue(3);
+        writer.ue(3);
+        writer.ue(1);
+        writer.ue(2);
+        writer.bit(true);
         writer.se(1);
         writer.se(-1);
-        writer.bit(true); // chroma_weight_l0_flag
+        writer.bit(true);
         writer.se(0);
         writer.se(1);
         writer.se(-1);
         writer.se(0);
-        writer.bit(true); // adaptive_ref_pic_marking_mode_flag
-        writer.ue(1); // memory_management_control_operation
-        writer.ue(2); // difference_of_pic_nums_minus1
-        writer.ue(0); // end of operations
-        writer.se(-1); // slice_qp_delta
-        writer.ue(1); // disable_deblocking_filter_idc
+        writer.bit(true);
+        writer.ue(1);
+        writer.ue(2);
+        writer.ue(0);
+        writer.se(-1);
+        writer.ue(1);
         let nal = writer.finish(0x41);
 
         let header = parse_slice_header(&nal, &test_sps(0, true), &pps).unwrap();
@@ -887,28 +883,28 @@ mod tests {
         let mut pps = test_pps();
         pps.weighted_bipred_idc = 1;
         let mut writer = TestBitWriter::default();
-        writer.ue(0); // first_mb_in_slice
-        writer.ue(1); // B slice
-        writer.ue(0); // pic_parameter_set_id
-        writer.bits(4, 2); // frame_num
-        writer.bit(true); // direct_spatial_mv_pred_flag
-        writer.bit(false); // num_ref_idx_active_override_flag
-        writer.bit(false); // ref_pic_list_modification_flag_l0
-        writer.bit(true); // ref_pic_list_modification_flag_l1
-        writer.ue(2); // long_term_pic_num
+        writer.ue(0);
+        writer.ue(1);
+        writer.ue(0);
+        writer.bits(4, 2);
+        writer.bit(true);
+        writer.bit(false);
+        writer.bit(false);
+        writer.bit(true);
+        writer.ue(2);
         writer.ue(4);
-        writer.ue(3); // modification_of_pic_nums_idc terminator
-        writer.ue(0); // luma_log2_weight_denom
-        writer.ue(0); // chroma_log2_weight_denom
-        writer.bit(false); // luma_weight_l0_flag
-        writer.bit(false); // chroma_weight_l0_flag
-        writer.bit(true); // luma_weight_l1_flag
+        writer.ue(3);
+        writer.ue(0);
+        writer.ue(0);
+        writer.bit(false);
+        writer.bit(false);
+        writer.bit(true);
         writer.se(2);
         writer.se(-1);
-        writer.bit(false); // chroma_weight_l1_flag
-        writer.bit(false); // adaptive_ref_pic_marking_mode_flag
-        writer.se(0); // slice_qp_delta
-        writer.ue(1); // disable_deblocking_filter_idc
+        writer.bit(false);
+        writer.bit(false);
+        writer.se(0);
+        writer.ue(1);
         let nal = writer.finish(0x21);
 
         let header = parse_slice_header(&nal, &test_sps(2, true), &pps).unwrap();
@@ -928,15 +924,15 @@ mod tests {
         let mut pps = test_pps();
         pps.bottom_field_pic_order_in_frame_present = true;
         let mut writer = TestBitWriter::default();
-        writer.ue(0); // first_mb_in_slice
-        writer.ue(2); // I slice
-        writer.ue(0); // pic_parameter_set_id
-        writer.bits(4, 4); // frame_num
-        writer.bit(true); // field_pic_flag
-        writer.bit(true); // bottom_field_flag
-        writer.se(-3); // delta_pic_order_cnt[0]
-        writer.se(0); // slice_qp_delta
-        writer.ue(1); // disable_deblocking_filter_idc
+        writer.ue(0);
+        writer.ue(2);
+        writer.ue(0);
+        writer.bits(4, 4);
+        writer.bit(true);
+        writer.bit(true);
+        writer.se(-3);
+        writer.se(0);
+        writer.ue(1);
         let nal = writer.finish(0x01);
 
         let header = parse_slice_header(&nal, &test_sps(1, false), &pps).unwrap();

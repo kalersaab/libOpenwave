@@ -72,8 +72,6 @@ impl Yuv420Frame {
         }
     }
 
-    /// Writes a predicted 4x4 block plus its inverse-transformed residual.
-    /// The prediction and residual are both row-major.
     pub fn reconstruct_block4x4(
         &mut self,
         plane: ColorPlane,

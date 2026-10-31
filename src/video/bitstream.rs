@@ -135,7 +135,6 @@ mod tests {
 
     #[test]
     fn reads_unsigned_exp_golomb() {
-        // ue(v): 1 -> 0, 010 -> 1, 011 -> 2
         let mut reader = BitReader::new(&[0b1010_0110]);
 
         assert_eq!(reader.read_ue().unwrap(), 0);
@@ -145,7 +144,6 @@ mod tests {
 
     #[test]
     fn reads_signed_exp_golomb() {
-        // se(v): 010 -> +1, 011 -> -1, 00100 -> +2
         let mut reader = BitReader::new(&[0b0100_1100, 0b1000_0000]);
 
         assert_eq!(reader.read_se().unwrap(), 1);

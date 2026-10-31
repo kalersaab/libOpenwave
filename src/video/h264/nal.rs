@@ -67,7 +67,7 @@ impl NalHeader {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NalUnit<'a> {
     pub header: NalHeader,
-    // Includes the one-byte NAL header.
+
     pub data: &'a [u8],
 }
 
@@ -120,7 +120,6 @@ pub fn parse_annex_b(data: &[u8]) -> Result<Vec<NalUnit<'_>>, AnnexBError> {
 
         let mut nal_end = next_start;
 
-        // Annex B permits trailing_zero_8bits between NAL units.
         while nal_end > nal_start && data[nal_end - 1] == 0 {
             nal_end -= 1;
         }

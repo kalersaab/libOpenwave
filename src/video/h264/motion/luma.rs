@@ -1,6 +1,5 @@
 use crate::video::h264::{frame::Yuv420Frame, motion::interpolation::half_sample_luma};
 
-/// Interpolates one luma sample at a quarter-luma-pixel coordinate.
 pub fn interpolate_luma_sample(frame: &Yuv420Frame, x_quarter: i64, y_quarter: i64) -> u8 {
     let x_quarter = x_quarter.clamp(-32, (i64::from(frame.width) + 8) * 4);
     let y_quarter = y_quarter.clamp(-32, (i64::from(frame.height) + 8) * 4);

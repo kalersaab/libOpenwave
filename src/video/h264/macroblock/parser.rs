@@ -7,6 +7,9 @@ use crate::video::{
 pub enum MacroblockParseError {
     Bitstream(BitstreamError),
     InvalidParameter,
+    InvalidMacroblockType,
+    InvalidCodedBlockPattern,
+    UnsupportedMacroblockType,
     UnsupportedMacroblock,
     UnsupportedResidual,
 }
@@ -25,7 +28,6 @@ impl From<BitstreamError> for MacroblockParseError {
     }
 }
 
-/// Parses the zero-residual P_L0_16x16 macroblock syntax subset.
 pub fn parse_p_macroblock(
     reader: &mut BitReader<'_>,
     active_reference_count: u32,
@@ -71,7 +73,6 @@ mod tests {
         let mut skip = BitReader::new(&[0b1000_0000]);
         assert_eq!(parse_p_macroblock(&mut skip, 1), Ok(MacroblockType::PSkip));
 
-        // mb_type=1, mvd=(0,0), inter coded_block_pattern codeNum=3.
         let mut p16x16 = BitReader::new(&[0b0101_1001, 0b0000_0000]);
         assert_eq!(
             parse_p_macroblock(&mut p16x16, 1),

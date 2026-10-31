@@ -57,8 +57,11 @@ Pass a path to your own PCM WAV file in place of `openwave-test.wav`.
   CAVLC 8-bit 4:2:0 IDR Intra16x16, P-skip, zero-residual P_L0_16x16
   macroblocks, and limited all-direct-skip B pictures. P_L0_16x16 supports
   quarter-pel luma and bilinear chroma interpolation with edge extension.
-  General P/B macroblock syntax, deblocking, and presentation reordering are
-  not implemented; this is not a general-purpose video player.
+  It builds default P/B reference lists and maintains a sliding-window
+  reference buffer (up to two pictures); explicit list modifications, adaptive
+  non-IDR reference marking, general P/B macroblock syntax, deblocking, and
+  presentation reordering are not implemented. This is not a general-purpose
+  video player.
 
 ## License
 
