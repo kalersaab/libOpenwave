@@ -50,9 +50,15 @@ Pass a path to your own PCM WAV file in place of `openwave-test.wav`.
   output device and provides playback and seek controls.
 - `openwave::demux::wav_stream::WavStreamReader` reads and seeks through WAV
   PCM data in frames.
-- `openwave::video::bitstream` and `openwave::video::h264` contain low-level
-  bitstream and H.264 parsing utilities. They do not provide full video
-  decoding or playback.
+- `openwave::video::h264::decoder::decode_annex_b` decodes the first supported
+  picture from an Annex B H.264 stream.
+- `openwave::video::h264::decoder::decode_annex_b_frames` decodes supported
+  pictures in bitstream order. The current experimental decoder handles
+  CAVLC 8-bit 4:2:0 IDR Intra16x16, P-skip, zero-residual P_L0_16x16
+  macroblocks, and limited all-direct-skip B pictures. P_L0_16x16 supports
+  quarter-pel luma and bilinear chroma interpolation with edge extension.
+  General P/B macroblock syntax, deblocking, and presentation reordering are
+  not implemented; this is not a general-purpose video player.
 
 ## License
 

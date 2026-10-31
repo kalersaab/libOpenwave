@@ -108,6 +108,7 @@ pub struct DeblockingFilterParameters {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SliceHeader {
+    pub slice_data_bit_offset: usize,
     pub prefix: SliceHeaderPrefix,
     pub colour_plane_id: Option<u8>,
     pub frame_num: u32,
@@ -560,6 +561,7 @@ pub fn parse_slice_header(nal: &[u8], sps: &Sps, pps: &Pps) -> Result<SliceHeade
     };
 
     Ok(SliceHeader {
+        slice_data_bit_offset: reader.bit_position(),
         prefix,
         colour_plane_id,
         frame_num,

@@ -29,6 +29,20 @@ pub struct CoeffToken {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Residual4x4Kind {
+    Full,
+    AcOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Residual4x4 {
+    /// Quantized coefficient levels in raster order.
+    pub coeff_levels: [i32; 16],
+}
+
+const ZIGZAG_4X4: [usize; 16] = [0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct VlcCode {
     bits: u16,
     len: u8,
@@ -572,6 +586,62 @@ pub fn decode_levels(
     Ok(levels)
 }
 
+pub fn decode_residual_4x4(
+    reader: &mut BitReader<'_>,
+    n_c: Option<u32>,
+    kind: Residual4x4Kind,
+) -> Result<Residual4x4, CavlcError> {
+    let max_num_coeff = match kind {
+        Residual4x4Kind::Full => 16,
+        Residual4x4Kind::AcOnly => 15,
+    };
+    let token = decode_coeff_token(reader, n_c, max_num_coeff)?;
+    let mut coeff_levels = [0; 16];
+    if token.total_coeff == 0 {
+        return Ok(Residual4x4 { coeff_levels });
+    }
+
+    let levels = decode_levels(reader, token)?;
+    let total_zeros = if token.total_coeff < max_num_coeff {
+        decode_total_zeros(reader, token.total_coeff, max_num_coeff)?
+    } else {
+        0
+    };
+
+    let mut runs = [0u8; 16];
+    let mut zeros_left = total_zeros;
+    for (index, run) in runs
+        .iter_mut()
+        .enumerate()
+        .take(usize::from(token.total_coeff))
+    {
+        *run = if index + 1 == usize::from(token.total_coeff) {
+            zeros_left
+        } else {
+            decode_run_before(reader, zeros_left)?
+        };
+        zeros_left = zeros_left
+            .checked_sub(*run)
+            .ok_or(CavlcError::InvalidCode)?;
+    }
+    if zeros_left != 0 {
+        return Err(CavlcError::InvalidCode);
+    }
+
+    let scan_offset = usize::from(matches!(kind, Residual4x4Kind::AcOnly));
+    let mut coeff_num = -1isize;
+    for level_index in (0..usize::from(token.total_coeff)).rev() {
+        coeff_num += isize::from(runs[level_index]) + 1;
+        if coeff_num < 0 || coeff_num >= isize::from(max_num_coeff) {
+            return Err(CavlcError::InvalidCode);
+        }
+        let scan_position = scan_offset + coeff_num as usize;
+        coeff_levels[ZIGZAG_4X4[scan_position]] = levels[level_index];
+    }
+
+    Ok(Residual4x4 { coeff_levels })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -785,6 +855,56 @@ mod tests {
             ),
             Ok(vec![1, 1, 1, 1])
         );
+    }
+
+    #[test]
+    fn decodes_and_places_a_full_residual_block() {
+        let bytes = reader("010010");
+        let block =
+            decode_residual_4x4(&mut BitReader::new(&bytes), Some(0), Residual4x4Kind::Full)
+                .unwrap();
+
+        let mut expected = [0; 16];
+        expected[4] = 1;
+        assert_eq!(block.coeff_levels, expected);
+    }
+
+    #[test]
+    fn decodes_multiple_levels_and_runs_in_reverse_scan_order() {
+        let bytes = reader("001011101");
+        let block =
+            decode_residual_4x4(&mut BitReader::new(&bytes), Some(0), Residual4x4Kind::Full)
+                .unwrap();
+
+        let mut expected = [0; 16];
+        expected[1] = -1;
+        expected[4] = 1;
+        assert_eq!(block.coeff_levels, expected);
+    }
+
+    #[test]
+    fn decodes_ac_only_block_without_overwriting_dc_position() {
+        let bytes = reader("010010");
+        let block = decode_residual_4x4(
+            &mut BitReader::new(&bytes),
+            Some(0),
+            Residual4x4Kind::AcOnly,
+        )
+        .unwrap();
+
+        let mut expected = [0; 16];
+        expected[8] = 1;
+        assert_eq!(block.coeff_levels, expected);
+    }
+
+    #[test]
+    fn returns_zero_block_when_coeff_token_is_empty() {
+        let bytes = reader("1");
+        let block =
+            decode_residual_4x4(&mut BitReader::new(&bytes), Some(0), Residual4x4Kind::Full)
+                .unwrap();
+
+        assert_eq!(block.coeff_levels, [0; 16]);
     }
 
     #[test]
