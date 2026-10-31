@@ -1,8 +1,53 @@
 # libOpenwave
 
-libOpenwave is a Rust media-engine project. The current implementation includes
-integer PCM WAV parsing and playback, plus foundational H.264 bitstream and
-parameter-set parsing.
+A from-scratch Rust media engine with H.264 video decoding, MP4 container support, AAC audio infrastructure, and WAV playback.
+
+## Features
+
+### ✅ Video Decoding
+- **H.264 Baseline Profile Decoder**
+  - I-frame, P-frame, B-frame (partial) support
+  - CAVLC entropy decoding
+  - Motion compensation with sub-macroblock partitions (16x16, 16x8, 8x16, 8x8, 4x4)
+  - In-loop deblocking filter
+  - Weighted prediction (explicit and implicit)
+  - Multiple reference frames
+  - Frame/field decoding with MBAFF
+  - 168 unit tests covering all components
+
+### ✅ Container Formats
+- **MP4 Demuxer**
+  - Full box parser (21 box types)
+  - Sample extraction with timestamps
+  - AVC1→Annex-B NAL conversion
+  - Audio and video track support
+  - Generic `Mp4Reader<R: Read + Seek>` API
+
+### ✅ Audio
+- **AAC Infrastructure** (decoder stub)
+  - AudioSpecificConfig parsing from MP4 esds
+  - ADTS header parsing for raw streams
+  - AAC-LC, Main, SSR, LTP profile detection
+  - Multi-channel support (1-7 channels)
+  - Frame-based decoding interface
+  
+- **WAV Playback**
+  - Complete WAV parser with streaming
+  - PCM format support (8/16/24/32-bit)
+  - Audio engine with cpal output
+  - Resampling and ring buffer
+  - Playback controls (play, pause, seek)
+
+### 🚧 In Progress
+- Full AAC-LC audio decoding (IMDCT, bitstream)
+- Audio/video synchronization
+- SDL2 video rendering
+
+### 📋 Planned
+- H.264 Main/High profiles
+- MKV container support
+- Opus audio codec
+- Hardware acceleration
 
 ## Requirements
 
@@ -41,27 +86,25 @@ cargo run --example play_wav -- openwave-test.wav
 
 Pass a path to your own PCM WAV file in place of `openwave-test.wav`.
 
-## Library overview
+## Library Overview
 
-- `openwave::WavFile` and `openwave::WavInfo` provide in-memory WAV parsing.
-- `openwave::audio::decode_integer_pcm` decodes 8-, 16-, 24-, and 32-bit
-  integer PCM samples to normalized `f32` values.
-- `openwave::audio::engine::AudioEngine` streams WAV audio to the default
-  output device and provides playback and seek controls.
-- `openwave::demux::wav_stream::WavStreamReader` reads and seeks through WAV
-  PCM data in frames.
-- `openwave::video::h264::decoder::decode_annex_b` decodes the first supported
-  picture from an Annex B H.264 stream.
-- `openwave::video::h264::decoder::decode_annex_b_frames` decodes supported
-  pictures in bitstream order. The current experimental decoder handles
-  CAVLC 8-bit 4:2:0 IDR Intra16x16, P-skip, zero-residual P_L0_16x16
-  macroblocks, and limited all-direct-skip B pictures. P_L0_16x16 supports
-  quarter-pel luma and bilinear chroma interpolation with edge extension.
-  It builds default P/B reference lists and maintains a sliding-window
-  reference buffer (up to two pictures); explicit list modifications, adaptive
-  non-IDR reference marking, general P/B macroblock syntax, deblocking, and
-  presentation reordering are not implemented. This is not a general-purpose
-  video player.
+### Video
+- `openwave::video::h264::decoder::decode_annex_b` - Decode single H.264 picture
+- `openwave::video::h264::decoder::decode_annex_b_frames` - Decode multiple pictures
+- `openwave::video::h264::avc::avc1_to_annex_b` - Convert AVC1 to Annex-B format
+- Supports CAVLC, motion compensation, deblocking, weighted prediction
+
+### Containers
+- `openwave::demux::mp4::Mp4Reader` - Parse MP4 files, extract samples
+- `openwave::demux::wav::WavFile` - Parse WAV files
+- `openwave::demux::wav_stream::WavStreamReader` - Stream WAV with seeking
+
+### Audio
+- `openwave::audio::aac::AacDecoder` - AAC decoder interface
+- `openwave::audio::decode_integer_pcm` - PCM integer to f32 conversion
+- `openwave::audio::engine::AudioEngine` - Streaming audio playback engine
+- `openwave::audio::resampler` - Sample rate conversion
+- `openwave::audio::ring_buffer` - Lock-free circular buffer
 
 ## License
 
