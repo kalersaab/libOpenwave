@@ -29,6 +29,8 @@ pub struct Pps {
     pub entropy_coding_mode: bool,
     pub bottom_field_pic_order_in_frame_present: bool,
     pub num_slice_groups: u32,
+    pub slice_group_map_type: Option<u32>,
+    pub slice_group_change_rate: u32,
     pub num_ref_idx_l0_default_active: u32,
     pub num_ref_idx_l1_default_active: u32,
     pub weighted_pred: bool,
@@ -75,9 +77,12 @@ fn ebsp_to_rbsp(ebsp: &[u8]) -> Vec<u8> {
     rbsp
 }
 
-fn skip_slice_groups(r: &mut BitReader<'_>, groups_minus1: u32) -> Result<(), PpsError> {
+fn skip_slice_groups(
+    r: &mut BitReader<'_>,
+    groups_minus1: u32,
+) -> Result<(Option<u32>, u32), PpsError> {
     if groups_minus1 == 0 {
-        return Ok(());
+        return Ok((None, 0));
     }
 
     // Defensive bound for malformed streams.
@@ -85,7 +90,9 @@ fn skip_slice_groups(r: &mut BitReader<'_>, groups_minus1: u32) -> Result<(), Pp
         return Err(PpsError::InvalidParameter);
     }
 
-    match ue(r)? {
+    let map_type = ue(r)?;
+    let mut change_rate = 0;
+    match map_type {
         0 => {
             // run_length_minus1[i]
             for _ in 0..=groups_minus1 {
@@ -104,7 +111,7 @@ fn skip_slice_groups(r: &mut BitReader<'_>, groups_minus1: u32) -> Result<(), Pp
         }
         3..=5 => {
             let _direction = flag(r)?;
-            let _rate = ue(r)?;
+            change_rate = ue(r)?.checked_add(1).ok_or(PpsError::InvalidParameter)?;
         }
         6 => {
             let units_minus1 = ue(r)?;
@@ -127,7 +134,7 @@ fn skip_slice_groups(r: &mut BitReader<'_>, groups_minus1: u32) -> Result<(), Pp
         _ => return Err(PpsError::InvalidParameter),
     }
 
-    Ok(())
+    Ok((Some(map_type), change_rate))
 }
 
 // `nal` includes the one-byte NAL header.
@@ -158,7 +165,7 @@ pub fn parse_pps(nal: &[u8]) -> Result<Pps, PpsError> {
         return Err(PpsError::InvalidParameter);
     }
 
-    skip_slice_groups(&mut r, groups_minus1)?;
+    let (slice_group_map_type, slice_group_change_rate) = skip_slice_groups(&mut r, groups_minus1)?;
 
     let l0_minus1 = ue(&mut r)?;
     let l1_minus1 = ue(&mut r)?;
@@ -169,6 +176,9 @@ pub fn parse_pps(nal: &[u8]) -> Result<Pps, PpsError> {
 
     let weighted_pred = flag(&mut r)?;
     let weighted_bipred_idc = r.read_bits(2)? as u8;
+    if weighted_bipred_idc == 3 {
+        return Err(PpsError::InvalidParameter);
+    }
 
     let pic_init_qp_minus26 = se(&mut r)?;
     let pic_init_qs_minus26 = se(&mut r)?;
@@ -191,6 +201,8 @@ pub fn parse_pps(nal: &[u8]) -> Result<Pps, PpsError> {
         entropy_coding_mode,
         bottom_field_pic_order_in_frame_present,
         num_slice_groups: groups_minus1 + 1,
+        slice_group_map_type,
+        slice_group_change_rate,
         num_ref_idx_l0_default_active: l0_minus1 + 1,
         num_ref_idx_l1_default_active: l1_minus1 + 1,
         weighted_pred,

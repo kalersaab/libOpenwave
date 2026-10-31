@@ -34,6 +34,18 @@ impl<'a> BitReader<'a> {
             .saturating_sub(self.bit_pos)
     }
 
+    pub fn bit_position(&self) -> usize {
+        self.bit_pos
+    }
+
+    pub fn skip_bits(&mut self, count: usize) -> Result<(), BitstreamError> {
+        if count > self.bits_remaining() {
+            return Err(BitstreamError::UnexpectedEof);
+        }
+        self.bit_pos += count;
+        Ok(())
+    }
+
     pub fn read_bit(&mut self) -> Result<bool, BitstreamError> {
         if self.bit_pos >= self.data.len().saturating_mul(8) {
             return Err(BitstreamError::UnexpectedEof);

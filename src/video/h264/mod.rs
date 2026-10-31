@@ -1,4 +1,11 @@
+pub mod cavlc;
+pub mod decoder;
+pub mod frame;
+pub mod intra;
+pub mod macroblock;
+pub mod motion;
 pub mod nal;
 pub mod pps;
 pub mod slice;
 pub mod sps;
+pub mod transform;
