@@ -6,9 +6,9 @@ use std::io;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AacProfile {
     Main = 1,
-    Lc = 2,      // Low Complexity (most common)
-    Ssr = 3,     // Scalable Sample Rate
-    Ltp = 4,     // Long Term Prediction
+    Lc = 2,  // Low Complexity (most common)
+    Ssr = 3, // Scalable Sample Rate
+    Ltp = 4, // Long Term Prediction
 }
 
 impl AacProfile {
@@ -106,9 +106,8 @@ impl AacConfig {
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid AAC profile"))?;
 
         let sample_rate_index = ((data[0] & 0x07) << 1) | ((data[1] >> 7) & 0x01);
-        let sample_rate = AacSampleRate::from_index(sample_rate_index).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "Invalid AAC sample rate")
-        })?;
+        let sample_rate = AacSampleRate::from_index(sample_rate_index)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid AAC sample rate"))?;
 
         let channels = (data[1] >> 3) & 0x0F;
         if channels == 0 || channels > 7 {
@@ -147,12 +146,18 @@ pub struct AdtsHeader {
 impl AdtsHeader {
     pub fn parse(data: &[u8]) -> io::Result<Self> {
         if data.len() < 7 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "ADTS header too short"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "ADTS header too short",
+            ));
         }
 
         // Sync word check (0xFFF)
         if data[0] != 0xFF || (data[1] & 0xF0) != 0xF0 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid ADTS sync word"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Invalid ADTS sync word",
+            ));
         }
 
         let profile_index = ((data[2] >> 6) & 0x03) + 1;
@@ -165,10 +170,9 @@ impl AdtsHeader {
         })?;
 
         let channels = ((data[2] & 0x01) << 2) | ((data[3] >> 6) & 0x03);
-        
-        let frame_length = (((data[3] & 0x03) as u16) << 11)
-            | ((data[4] as u16) << 3)
-            | ((data[5] >> 5) as u16);
+
+        let frame_length =
+            (((data[3] & 0x03) as u16) << 11) | ((data[4] as u16) << 3) | ((data[5] >> 5) as u16);
 
         Ok(AdtsHeader {
             profile,
@@ -242,9 +246,9 @@ mod tests {
         // 0x10 = 0001 0000
         //   freq_idx continued, channels=2
         let config_data = [0x12, 0x10];
-        
+
         let config = AacConfig::from_audio_specific_config(&config_data).unwrap();
-        
+
         assert_eq!(config.profile, AacProfile::Lc);
         assert_eq!(config.sample_rate, AacSampleRate::Hz44100);
         assert_eq!(config.channels, 2);
@@ -255,9 +259,9 @@ mod tests {
     fn parses_aac_lc_48000_stereo_config() {
         // AAC-LC, 48kHz, stereo
         let config_data = [0x11, 0x90];
-        
+
         let config = AacConfig::from_audio_specific_config(&config_data).unwrap();
-        
+
         assert_eq!(config.profile, AacProfile::Lc);
         assert_eq!(config.sample_rate, AacSampleRate::Hz48000);
         assert_eq!(config.channels, 2);
@@ -267,7 +271,7 @@ mod tests {
     fn rejects_invalid_aac_config() {
         // Too short
         assert!(AacConfig::from_audio_specific_config(&[0x12]).is_err());
-        
+
         // Invalid profile (0)
         assert!(AacConfig::from_audio_specific_config(&[0x00, 0x10]).is_err());
     }
@@ -277,14 +281,14 @@ mod tests {
         // ADTS header: sync(0xFFF), AAC-LC, 44.1kHz, stereo
         let adts_data = [
             0xFF, 0xF1, // Sync + MPEG-4 + no CRC
-            0x50,       // Profile=LC, freq=44.1kHz (partial)
-            0x80,       // freq+channels=2, frame_length (partial)
+            0x50, // Profile=LC, freq=44.1kHz (partial)
+            0x80, // freq+channels=2, frame_length (partial)
             0x01, 0x20, // frame_length continued
-            0xFC,       // buffer fullness
+            0xFC, // buffer fullness
         ];
-        
+
         let header = AdtsHeader::parse(&adts_data).unwrap();
-        
+
         assert_eq!(header.profile, AacProfile::Lc);
         assert_eq!(header.sample_rate, AacSampleRate::Hz44100);
         assert_eq!(header.channels, 2);
@@ -299,9 +303,9 @@ mod tests {
     #[test]
     fn creates_decoder_from_config() {
         let config_data = [0x12, 0x10]; // AAC-LC, 44.1kHz, stereo
-        
+
         let decoder = AacDecoder::from_audio_specific_config(&config_data).unwrap();
-        
+
         assert_eq!(decoder.sample_rate(), 44100);
         assert_eq!(decoder.channels(), 2);
         assert_eq!(decoder.samples_per_frame(), 1024);
@@ -311,9 +315,9 @@ mod tests {
     fn decode_frame_returns_correct_size() {
         let config_data = [0x12, 0x10];
         let mut decoder = AacDecoder::from_audio_specific_config(&config_data).unwrap();
-        
+
         let samples = decoder.decode_frame(&[0u8; 100]).unwrap();
-        
+
         // 1024 samples/frame * 2 channels = 2048 samples
         assert_eq!(samples.len(), 2048);
     }

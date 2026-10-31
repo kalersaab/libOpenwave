@@ -278,39 +278,6 @@ pub fn parse_stss<R: Read>(reader: &mut R) -> Mp4Result<Vec<u32>> {
     Ok(sync_samples)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Cursor;
-
-    #[test]
-    fn reads_box_header() {
-        let data = vec![0x00, 0x00, 0x00, 0x20, b'f', b't', b'y', b'p'];
-
-        let mut cursor = Cursor::new(data);
-        let header = parse_box_header(&mut cursor).unwrap();
-
-        assert_eq!(header.box_type, BoxType::FTYP);
-        assert_eq!(header.size, 32);
-        assert_eq!(header.header_size, 8);
-    }
-
-    #[test]
-    fn reads_u32_big_endian() {
-        let data = vec![0x12, 0x34, 0x56, 0x78];
-        let mut cursor = Cursor::new(data);
-        assert_eq!(read_u32(&mut cursor).unwrap(), 0x12345678);
-    }
-
-    #[test]
-    fn rejects_invalid_box_size() {
-        let data = vec![0x00, 0x00, 0x00, 0x04, b'f', b't', b'y', b'p'];
-
-        let mut cursor = Cursor::new(data);
-        assert!(parse_box_header(&mut cursor).is_err());
-    }
-}
-
 pub fn parse_esds<R: Read>(reader: &mut R, size: u64) -> Mp4Result<Vec<u8>> {
     // ESDS (Elementary Stream Descriptor) contains AAC configuration
     // Format: version/flags (4), ES_DescrTag, ...
@@ -438,4 +405,38 @@ pub fn parse_mp4a<R: Read>(reader: &mut R, size: u64) -> Mp4Result<(u32, u16, Ve
     }
 
     Ok((sample_rate, channels, audio_specific_config))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn reads_box_header() {
+        let data = vec![0x00, 0x00, 0x00, 0x20, b'f', b't', b'y', b'p'];
+
+        let mut cursor = Cursor::new(data);
+        let header = parse_box_header(&mut cursor).unwrap();
+
+        assert_eq!(header.box_type, BoxType::FTYP);
+        assert_eq!(header.size, 32);
+        assert_eq!(header.header_size, 8);
+    }
+
+    #[test]
+    fn reads_u32_big_endian() {
+        let data = vec![0x12, 0x34, 0x56, 0x78];
+        let mut cursor = Cursor::new(data);
+        assert_eq!(read_u32(&mut cursor).unwrap(), 0x12345678);
+    }
+
+    #[test]
+    fn rejects_invalid_box_size() {
+        let data = vec![0x00, 0x00, 0x00, 0x04, b'f', b't', b'y', b'p'];
+
+        let mut cursor = Cursor::new(data);
+        assert!(parse_box_header(&mut cursor).is_err());
+    }
+
 }
