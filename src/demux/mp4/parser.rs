@@ -341,7 +341,9 @@ pub fn parse_esds<R: Read>(reader: &mut R, size: u64) -> Mp4Result<Vec<u8>> {
     }
 
     if audio_specific_config.is_empty() {
-        return Err(Mp4Error::InvalidFormat("No AudioSpecificConfig found in esds"));
+        return Err(Mp4Error::InvalidFormat(
+            "No AudioSpecificConfig found in esds",
+        ));
     }
 
     Ok(audio_specific_config)
@@ -438,5 +440,4 @@ mod tests {
         let mut cursor = Cursor::new(data);
         assert!(parse_box_header(&mut cursor).is_err());
     }
-
 }

@@ -2,6 +2,7 @@ pub mod audio;
 pub mod core;
 pub mod demux;
 pub mod source;
+pub mod sync;
 pub mod video;
 
 pub use demux::wav::{WavError, WavFile, WavInfo};

@@ -38,13 +38,31 @@ A from-scratch Rust media engine with H.264 video decoding, MP4 container suppor
   - Resampling and ring buffer
   - Playback controls (play, pause, seek)
 
+### ✅ Synchronization
+- **Audio/Video Sync**
+  - Audio clock as master timing source
+  - Frame scheduler with PTS-based timing
+  - Automatic drift compensation
+  - Drop/wait frame decisions
+  - Stream state management
+  - Seek support with reset
+  - 24 comprehensive unit tests
+
+### ✅ Display
+- **YUV→RGB Conversion**
+  - BT.601 color space conversion
+  - 4:2:0 chroma subsampling support
+  - PPM image export for frames
+  - Efficient pixel-level conversion
+  - 4 unit tests
+
 ### 🚧 In Progress
 - Full AAC-LC audio decoding (IMDCT, bitstream)
-- Audio/video synchronization
-- SDL2 video rendering
 
 ### 📋 Planned
+- Full AAC-LC audio decoding (IMDCT, Huffman)
 - H.264 Main/High profiles
+- Video display (SDL2/winit/pixels)
 - MKV container support
 - Opus audio codec
 - Hardware acceleration
@@ -63,28 +81,31 @@ cargo test
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-## Play a WAV file
+## Examples
 
-Use the streaming audio engine for playback with pause, resume, stop, and seek
-controls:
+### Decode MP4 and Save Frames
+
+Extract decoded video frames from an MP4 file:
+
+```sh
+cargo run --release --example decode_mp4_frames -- input.mp4 10
+```
+
+This decodes the first 10 video frames and saves them as PPM images (`frame_0000.ppm`, etc.).
+
+### Play WAV Audio
+
+Use the streaming audio engine for playback with controls:
 
 ```sh
 cargo run --example play_controls -- openwave-test.wav
 ```
 
-Run the seek demonstration with:
+For seek demonstration:
 
 ```sh
 cargo run --example test_seek -- openwave-test.wav
 ```
-
-An additional example demonstrates direct playback using `WavFile`:
-
-```sh
-cargo run --example play_wav -- openwave-test.wav
-```
-
-Pass a path to your own PCM WAV file in place of `openwave-test.wav`.
 
 ## Library Overview
 
@@ -105,6 +126,12 @@ Pass a path to your own PCM WAV file in place of `openwave-test.wav`.
 - `openwave::audio::engine::AudioEngine` - Streaming audio playback engine
 - `openwave::audio::resampler` - Sample rate conversion
 - `openwave::audio::ring_buffer` - Lock-free circular buffer
+
+### Synchronization
+- `openwave::sync::SyncController` - Audio/video synchronization coordinator
+- `openwave::sync::AudioClock` - Sample-based master clock
+- `openwave::sync::FrameScheduler` - PTS-based frame timing
+- Clock management, drift compensation, seek support
 
 ## License
 

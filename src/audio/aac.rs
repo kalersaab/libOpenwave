@@ -88,11 +88,6 @@ pub struct AacConfig {
 }
 
 impl AacConfig {
-    /// Parse AAC AudioSpecificConfig from MP4 esds or other container
-    /// Format (simplified):
-    /// - 5 bits: object type (profile + 1)
-    /// - 4 bits: sampling frequency index
-    /// - 4 bits: channel configuration
     pub fn from_audio_specific_config(data: &[u8]) -> io::Result<Self> {
         if data.len() < 2 {
             return Err(io::Error::new(
