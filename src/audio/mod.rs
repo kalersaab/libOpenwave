@@ -1,5 +1,6 @@
 use std::error::Error;
 use std::fmt;
+pub mod aac;
 pub mod engine;
 pub mod resampler;
 pub mod ring_buffer;
