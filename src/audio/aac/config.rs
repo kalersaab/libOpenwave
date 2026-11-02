@@ -1,14 +1,14 @@
-// AAC (Advanced Audio Codec) decoder implementation
-// Supports AAC-LC (Low Complexity) profile
+
+
 
 use std::io;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AacProfile {
     Main = 1,
-    Lc = 2,  // Low Complexity (most common)
-    Ssr = 3, // Scalable Sample Rate
-    Ltp = 4, // Long Term Prediction
+    Lc = 2,  
+    Ssr = 3, 
+    Ltp = 4, 
 }
 
 impl AacProfile {
@@ -112,7 +112,7 @@ impl AacConfig {
             ));
         }
 
-        // Standard AAC frame length is 1024 samples
+        
         let frame_length = 1024;
 
         Ok(AacConfig {
@@ -128,8 +128,8 @@ impl AacConfig {
     }
 }
 
-/// ADTS (Audio Data Transport Stream) header parser
-/// Used for raw AAC streams (not MP4)
+
+
 #[derive(Debug, Clone)]
 pub struct AdtsHeader {
     pub profile: AacProfile,
@@ -147,7 +147,7 @@ impl AdtsHeader {
             ));
         }
 
-        // Sync word check (0xFFF)
+        
         if data[0] != 0xFF || (data[1] & 0xF0) != 0xF0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -178,9 +178,9 @@ impl AdtsHeader {
     }
 }
 
-/// Minimal AAC decoder stub
-/// Full implementation would require MDCT, scale factor decoding, etc.
-/// For now, this provides the interface for integration
+
+
+
 pub struct AacDecoder {
     config: AacConfig,
 }
@@ -199,19 +199,19 @@ impl AacDecoder {
         &self.config
     }
 
-    /// Decode an AAC frame to PCM samples
-    /// Returns samples as f32 in range [-1.0, 1.0], interleaved
-    /// Output length = frame_length * channels
+    
+    
+    
     pub fn decode_frame(&mut self, _data: &[u8]) -> io::Result<Vec<f32>> {
-        // TODO: Full AAC decoding requires:
-        // 1. Bitstream parsing (Huffman tables, scale factors)
-        // 2. Inverse quantization
-        // 3. IMDCT (Inverse Modified Discrete Cosine Transform)
-        // 4. Window and overlap-add
-        // 5. TNS (Temporal Noise Shaping) if present
-        // 6. MS stereo decoding if present
-        //
-        // For now, return silence as placeholder
+        
+        
+        
+        
+        
+        
+        
+        
+        
         let sample_count = self.config.frame_length as usize * self.config.channels as usize;
         Ok(vec![0.0; sample_count])
     }
@@ -235,11 +235,11 @@ mod tests {
 
     #[test]
     fn parses_aac_lc_44100_stereo_config() {
-        // AAC-LC, 44.1kHz, stereo
-        // 0x12 = 0001 0010
-        //   profile=2 (LC), freq_idx=4 (44.1kHz) partial
-        // 0x10 = 0001 0000
-        //   freq_idx continued, channels=2
+        
+        
+        
+        
+        
         let config_data = [0x12, 0x10];
 
         let config = AacConfig::from_audio_specific_config(&config_data).unwrap();
@@ -252,7 +252,7 @@ mod tests {
 
     #[test]
     fn parses_aac_lc_48000_stereo_config() {
-        // AAC-LC, 48kHz, stereo
+        
         let config_data = [0x11, 0x90];
 
         let config = AacConfig::from_audio_specific_config(&config_data).unwrap();
@@ -264,22 +264,22 @@ mod tests {
 
     #[test]
     fn rejects_invalid_aac_config() {
-        // Too short
+        
         assert!(AacConfig::from_audio_specific_config(&[0x12]).is_err());
 
-        // Invalid profile (0)
+        
         assert!(AacConfig::from_audio_specific_config(&[0x00, 0x10]).is_err());
     }
 
     #[test]
     fn parses_adts_header() {
-        // ADTS header: sync(0xFFF), AAC-LC, 44.1kHz, stereo
+        
         let adts_data = [
-            0xFF, 0xF1, // Sync + MPEG-4 + no CRC
-            0x50, // Profile=LC, freq=44.1kHz (partial)
-            0x80, // freq+channels=2, frame_length (partial)
-            0x01, 0x20, // frame_length continued
-            0xFC, // buffer fullness
+            0xFF, 0xF1, 
+            0x50, 
+            0x80, 
+            0x01, 0x20, 
+            0xFC, 
         ];
 
         let header = AdtsHeader::parse(&adts_data).unwrap();
@@ -297,7 +297,7 @@ mod tests {
 
     #[test]
     fn creates_decoder_from_config() {
-        let config_data = [0x12, 0x10]; // AAC-LC, 44.1kHz, stereo
+        let config_data = [0x12, 0x10]; 
 
         let decoder = AacDecoder::from_audio_specific_config(&config_data).unwrap();
 
@@ -313,7 +313,7 @@ mod tests {
 
         let samples = decoder.decode_frame(&[0u8; 100]).unwrap();
 
-        // 1024 samples/frame * 2 channels = 2048 samples
+        
         assert_eq!(samples.len(), 2048);
     }
 }

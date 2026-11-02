@@ -151,7 +151,7 @@ mod tests {
     fn resets_state() {
         let mut scheduler = FrameScheduler::new(90000, 48000, 30.0);
 
-        scheduler.schedule_frame(0, 1.0); // Drop
+        scheduler.schedule_frame(0, 1.0); 
         assert!(scheduler.stats().dropped_frames > 0);
 
         scheduler.reset();

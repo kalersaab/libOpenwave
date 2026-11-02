@@ -131,6 +131,7 @@ pub struct SliceHeader {
     pub slice_qs_delta: Option<i32>,
     pub deblocking_filter: Option<DeblockingFilterParameters>,
     pub slice_group_change_cycle: Option<u32>,
+    pub cabac_init_idc: Option<u32>,
 }
 
 fn ebsp_to_rbsp(ebsp: &[u8]) -> Vec<u8> {
@@ -344,15 +345,16 @@ pub fn parse_slice_header(nal: &[u8], sps: &Sps, pps: &Pps) -> Result<SliceHeade
     let (nal_ref_idc, nal_type) = parse_nal_header(nal)?;
     let is_idr = nal_type == 5;
 
-    if pps.entropy_coding_mode {
-        return Err(SliceError::UnsupportedFeature);
-    }
     if pps.id > 255 || pps.sps_id != sps.id {
         return Err(SliceError::ParameterSetMismatch);
     }
     if pps.num_slice_groups == 0
         || pps.num_slice_groups > 1 && !matches!(pps.slice_group_map_type, Some(0..=6))
     {
+        eprintln!(
+            "[parse_slice_header] Unsupported slice_groups: num={}, map_type={:?}",
+            pps.num_slice_groups, pps.slice_group_map_type
+        );
         return Err(SliceError::UnsupportedFeature);
     }
 
@@ -492,6 +494,15 @@ pub fn parse_slice_header(nal: &[u8], sps: &Sps, pps: &Pps) -> Result<SliceHeade
     } else {
         None
     };
+    let cabac_init_idc = if pps.entropy_coding_mode && !is_i_or_si_slice {
+        let idc = reader.read_ue()?;
+        if idc > 2 {
+            return Err(SliceError::InvalidParameter);
+        }
+        Some(idc)
+    } else {
+        None
+    };
     let slice_qp_delta = reader.read_se()?;
     let qp_y = 26i64 + i64::from(pps.pic_init_qp_minus26) + i64::from(slice_qp_delta);
     if !(0..=51).contains(&qp_y) {
@@ -555,8 +566,20 @@ pub fn parse_slice_header(nal: &[u8], sps: &Sps, pps: &Pps) -> Result<SliceHeade
             let bits = u32::BITS - units.leading_zeros();
             Some(reader.read_bits(bits)?)
         }
-        _ => return Err(SliceError::UnsupportedFeature),
+        _ => {
+            eprintln!(
+                "[parse_slice_header] Unsupported num_slice_groups: {}",
+                pps.num_slice_groups
+            );
+            return Err(SliceError::UnsupportedFeature);
+        }
     };
+
+    if pps.entropy_coding_mode {
+        while !reader.is_byte_aligned() {
+            let _ = reader.read_bit()?;
+        }
+    }
 
     Ok(SliceHeader {
         slice_data_bit_offset: reader.bit_position(),
@@ -582,6 +605,7 @@ pub fn parse_slice_header(nal: &[u8], sps: &Sps, pps: &Pps) -> Result<SliceHeade
         slice_qs_delta,
         deblocking_filter,
         slice_group_change_cycle,
+        cabac_init_idc,
     })
 }
 
@@ -943,14 +967,25 @@ mod tests {
     }
 
     #[test]
-    fn rejects_cabac_parameter_set() {
+    fn parses_cabac_parameter_set() {
         let mut pps = test_pps();
         pps.entropy_coding_mode = true;
-        let nal = make_nal(0x41, &[0, 0, 0]);
+        let mut writer = TestBitWriter::default();
+        writer.ue(0);
+        writer.ue(2);
+        writer.ue(0);
+        writer.bits(4, 5);
+        writer.ue(3);
+        writer.bits(4, 7);
+        writer.bit(false);
+        writer.bit(true);
+        writer.se(0);
+        writer.ue(0);
+        writer.se(-1);
+        writer.se(1);
+        let nal = writer.finish(0x65);
 
-        assert_eq!(
-            parse_slice_header(&nal, &test_sps(0, true), &pps),
-            Err(SliceError::UnsupportedFeature)
-        );
+        let header = parse_slice_header(&nal, &test_sps(0, true), &pps).unwrap();
+        assert_eq!(header.frame_num, 5);
     }
 }

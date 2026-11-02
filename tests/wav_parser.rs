@@ -12,7 +12,7 @@ fn make_wav(channels: u16, sample_rate: u32, bits: u16, pcm: &[u8]) -> Vec<u8> {
 
     bytes.extend_from_slice(b"fmt ");
     bytes.extend_from_slice(&16u32.to_le_bytes());
-    bytes.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    bytes.extend_from_slice(&1u16.to_le_bytes()); 
     bytes.extend_from_slice(&channels.to_le_bytes());
     bytes.extend_from_slice(&sample_rate.to_le_bytes());
     bytes.extend_from_slice(&byte_rate.to_le_bytes());

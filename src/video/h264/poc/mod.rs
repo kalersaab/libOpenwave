@@ -219,6 +219,7 @@ mod tests {
             slice_qs_delta: None,
             deblocking_filter: None,
             slice_group_change_cycle: None,
+            cabac_init_idc: None,
         }
     }
 
