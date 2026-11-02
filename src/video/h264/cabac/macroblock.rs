@@ -5,7 +5,6 @@ use crate::video::h264::{
     slice::SliceType,
 };
 
-
 pub fn decode_mb_skip_flag(
     engine: &mut CabacEngine<'_>,
     contexts: &mut CabacContexts,
@@ -50,7 +49,6 @@ pub fn decode_i_slice_mb_type(
         return Ok(MacroblockType::Ipcm);
     }
 
-    
     let cbp_luma_nz = engine.decode_decision(&mut contexts.states[6])?;
     let mut cbp_chroma = 0;
     if engine.decode_decision(&mut contexts.states[7])? == 1 {
@@ -73,7 +71,6 @@ pub fn decode_i_slice_mb_type(
         coded_luma_pattern,
     })
 }
-
 
 pub fn decode_p_slice_mb_type(
     engine: &mut CabacEngine<'_>,
@@ -163,7 +160,6 @@ pub fn decode_cabac_ref_idx(
     Ok(ref_idx)
 }
 
-
 pub fn decode_cabac_mvd(
     engine: &mut CabacEngine<'_>,
     contexts: &mut CabacContexts,
@@ -219,23 +215,18 @@ pub fn decode_cabac_cbp(
 ) -> Result<u32, H264DecodeError> {
     let mut cbp = 0u32;
 
-    
     let ctx0 = usize::from((left_cbp & 0x02) == 0) + 2 * usize::from((top_cbp & 0x04) == 0);
     cbp |= engine.decode_decision(&mut contexts.states[73 + ctx0])? as u32;
 
-    
     let ctx1 = usize::from((cbp & 0x01) == 0) + 2 * usize::from((top_cbp & 0x08) == 0);
     cbp |= (engine.decode_decision(&mut contexts.states[73 + ctx1])? as u32) << 1;
 
-    
     let ctx2 = usize::from((left_cbp & 0x08) == 0) + 2 * usize::from((cbp & 0x01) == 0);
     cbp |= (engine.decode_decision(&mut contexts.states[73 + ctx2])? as u32) << 2;
 
-    
     let ctx3 = usize::from((cbp & 0x04) == 0) + 2 * usize::from((cbp & 0x02) == 0);
     cbp |= (engine.decode_decision(&mut contexts.states[73 + ctx3])? as u32) << 3;
 
-    
     let cbp_a = (left_cbp >> 4) & 0x03;
     let cbp_b = (top_cbp >> 4) & 0x03;
 
@@ -262,7 +253,6 @@ pub fn decode_cabac_cbp(
 
     Ok(cbp)
 }
-
 
 pub fn decode_cabac_mb_qp_delta(
     engine: &mut CabacEngine<'_>,
@@ -318,7 +308,6 @@ pub fn decode_cabac_chroma_pred_mode(
     }
     Ok(3)
 }
-
 
 pub fn decode_intra4x4_pred_mode(
     engine: &mut CabacEngine<'_>,

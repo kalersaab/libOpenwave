@@ -74,12 +74,11 @@ fn parse_box_header_ex<R: Read + Seek>(
                 "Box with size=0 not allowed here",
             ));
         }
-        
+
         let current_pos = reader.stream_position()?;
         let file_size = reader.seek(SeekFrom::End(0))?;
         reader.seek(SeekFrom::Start(current_pos))?;
-        
-        
+
         let remaining = file_size.saturating_sub(current_pos).saturating_add(8);
         (remaining, 8)
     } else {
@@ -101,8 +100,7 @@ pub fn parse_ftyp<R: Read + Seek>(reader: &mut R, size: u64) -> Mp4Result<()> {
     let _major_brand = read_u32(reader)?;
     let _minor_version = read_u32(reader)?;
 
-    
-    let mut remaining = size.saturating_sub(8); 
+    let mut remaining = size.saturating_sub(8);
     while remaining >= 4 {
         let _compatible_brand = read_u32(reader)?;
         remaining -= 4;
@@ -117,17 +115,17 @@ pub fn parse_ftyp<R: Read + Seek>(reader: &mut R, size: u64) -> Mp4Result<()> {
 
 pub fn parse_mvhd<R: Read + Seek>(reader: &mut R) -> Mp4Result<(u32, u64)> {
     let version = read_u8(reader)?;
-    skip_bytes(reader, 3)?; 
+    skip_bytes(reader, 3)?;
 
     eprintln!("[parse_mvhd] version: {}", version);
 
     let (timescale, duration) = if version == 1 {
-        skip_bytes(reader, 16)?; 
+        skip_bytes(reader, 16)?;
         let timescale = read_u32(reader)?;
         let duration = read_u64(reader)?;
         (timescale, duration)
     } else {
-        skip_bytes(reader, 8)?; 
+        skip_bytes(reader, 8)?;
         let timescale = read_u32(reader)?;
         let duration = read_u32(reader)? as u64;
         (timescale, duration)
@@ -138,14 +136,6 @@ pub fn parse_mvhd<R: Read + Seek>(reader: &mut R) -> Mp4Result<(u32, u64)> {
         timescale, duration
     );
 
-    
-    
-    
-    
-    
-    
-    
-    
     skip_bytes(reader, 80)?;
 
     Ok((timescale, duration))
@@ -190,18 +180,17 @@ pub fn parse_mdhd<R: Read + Seek>(reader: &mut R) -> Mp4Result<(u32, u64)> {
     skip_bytes(reader, 3)?;
 
     let (timescale, duration) = if version == 1 {
-        skip_bytes(reader, 16)?; 
+        skip_bytes(reader, 16)?;
         let timescale = read_u32(reader)?;
         let duration = read_u64(reader)?;
         (timescale, duration)
     } else {
-        skip_bytes(reader, 8)?; 
+        skip_bytes(reader, 8)?;
         let timescale = read_u32(reader)?;
         let duration = read_u32(reader)? as u64;
         (timescale, duration)
     };
 
-    
     skip_bytes(reader, 4)?;
 
     Ok((timescale, duration))
@@ -325,14 +314,11 @@ pub fn parse_stss<R: Read + Seek>(reader: &mut R) -> Mp4Result<Vec<u32>> {
 }
 
 pub fn parse_esds<R: Read + Seek>(reader: &mut R, size: u64) -> Mp4Result<Vec<u8>> {
-    
-    
-    skip_bytes(reader, 4)?; 
+    skip_bytes(reader, 4)?;
 
     let mut remaining = size - 4;
     let mut audio_specific_config = Vec::new();
 
-    
     while remaining > 0 && audio_specific_config.is_empty() {
         if remaining < 2 {
             break;
@@ -340,40 +326,34 @@ pub fn parse_esds<R: Read + Seek>(reader: &mut R, size: u64) -> Mp4Result<Vec<u8
 
         let tag = read_u8(reader)?;
         let desc_len = read_descriptor_length(reader, &mut remaining)?;
-        remaining -= 1; 
+        remaining -= 1;
 
         match tag {
             0x03 => {
-                
                 if desc_len < 3 {
                     skip_bytes(reader, desc_len as u64)?;
                     remaining -= desc_len as u64;
                     continue;
                 }
-                skip_bytes(reader, 3)?; 
+                skip_bytes(reader, 3)?;
                 remaining -= 3;
-                
             }
             0x04 => {
-                
                 if desc_len < 13 {
                     skip_bytes(reader, desc_len as u64)?;
                     remaining -= desc_len as u64;
                     continue;
                 }
-                skip_bytes(reader, 13)?; 
+                skip_bytes(reader, 13)?;
                 remaining -= 13;
-                
             }
             0x05 => {
-                
                 audio_specific_config = vec![0u8; desc_len as usize];
                 reader.read_exact(&mut audio_specific_config)?;
                 remaining -= desc_len as u64;
                 break;
             }
             0x06 => {
-                
                 if desc_len > 0 && (desc_len as u64) <= remaining {
                     skip_bytes(reader, desc_len as u64)?;
                     remaining -= desc_len as u64;
@@ -382,7 +362,6 @@ pub fn parse_esds<R: Read + Seek>(reader: &mut R, size: u64) -> Mp4Result<Vec<u8
                 }
             }
             _ => {
-                
                 if desc_len > 0 && (desc_len as u64) <= remaining {
                     skip_bytes(reader, desc_len as u64)?;
                     remaining -= desc_len as u64;
@@ -407,7 +386,6 @@ pub fn parse_esds<R: Read + Seek>(reader: &mut R, size: u64) -> Mp4Result<Vec<u8
 }
 
 fn read_descriptor_length<R: Read>(reader: &mut R, remaining: &mut u64) -> Mp4Result<u32> {
-    
     let mut length = 0u32;
     for _ in 0..4 {
         if *remaining == 0 {
@@ -424,24 +402,22 @@ fn read_descriptor_length<R: Read>(reader: &mut R, remaining: &mut u64) -> Mp4Re
 }
 
 pub fn parse_mp4a<R: Read + Seek>(reader: &mut R, size: u64) -> Mp4Result<(u32, u16, Vec<u8>)> {
-    
-    skip_bytes(reader, 6)?; 
-    skip_bytes(reader, 2)?; 
+    skip_bytes(reader, 6)?;
+    skip_bytes(reader, 2)?;
 
-    skip_bytes(reader, 8)?; 
+    skip_bytes(reader, 8)?;
 
     let channels = read_u16(reader)?;
     let _sample_size = read_u16(reader)?;
 
-    skip_bytes(reader, 4)?; 
+    skip_bytes(reader, 4)?;
 
     let sample_rate = read_u32(reader)?;
-    let sample_rate = sample_rate >> 16; 
+    let sample_rate = sample_rate >> 16;
 
     let mut remaining = size - 8 - 6 - 2 - 8 - 2 - 2 - 4 - 4;
     let mut audio_specific_config = Vec::new();
 
-    
     while remaining >= 8 {
         let box_header = parse_box_header(reader)?;
         remaining -= box_header.header_size;
@@ -453,7 +429,6 @@ pub fn parse_mp4a<R: Read + Seek>(reader: &mut R, size: u64) -> Mp4Result<(u32, 
             remaining -= content_size;
             break;
         } else {
-            
             skip_bytes(reader, content_size)?;
             remaining -= content_size;
         }

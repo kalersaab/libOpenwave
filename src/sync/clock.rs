@@ -138,10 +138,10 @@ mod tests {
 
         assert_eq!(clock.time(), 0.0);
 
-        clock.update(48000); 
+        clock.update(48000);
         assert!((clock.time() - 1.0).abs() < 0.001);
 
-        clock.update(96000); 
+        clock.update(96000);
         assert!((clock.time() - 2.0).abs() < 0.001);
     }
 
@@ -149,10 +149,10 @@ mod tests {
     fn audio_clock_increments() {
         let clock = AudioClock::new(44100);
 
-        clock.increment(22050); 
+        clock.increment(22050);
         assert!((clock.time() - 0.5).abs() < 0.001);
 
-        clock.increment(22050); 
+        clock.increment(22050);
         assert!((clock.time() - 1.0).abs() < 0.001);
     }
 
@@ -174,7 +174,7 @@ mod tests {
         clock.update(48000);
         assert!((clock.time() - 1.0).abs() < 0.001);
 
-        clock.adjust(0.5); 
+        clock.adjust(0.5);
         assert!((clock.time() - 1.5).abs() < 0.001);
     }
 
@@ -196,7 +196,7 @@ mod tests {
         let duration = time_until(2.0, 1.0);
         assert!((duration.as_secs_f64() - 1.0).abs() < 0.001);
 
-        let duration = time_until(1.0, 2.0); 
+        let duration = time_until(1.0, 2.0);
         assert_eq!(duration, Duration::ZERO);
     }
 

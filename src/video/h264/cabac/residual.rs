@@ -14,7 +14,6 @@ const COEFF_ABS_LEVELGT1_CTX: [usize; 8] = [5, 5, 5, 5, 6, 7, 8, 9];
 const COEFF_ABS_LEVEL_TRANS_LEVEL1: [usize; 8] = [1, 2, 3, 3, 4, 5, 6, 7];
 const COEFF_ABS_LEVEL_TRANS_LEVELGT1: [usize; 8] = [4, 4, 4, 4, 5, 6, 7, 7];
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResidualCategory {
     LumaDc = 0,
@@ -23,8 +22,6 @@ pub enum ResidualCategory {
     ChromaDc = 3,
     ChromaAc = 4,
 }
-
-
 
 pub fn decode_cabac_residual_block(
     engine: &mut CabacEngine<'_>,

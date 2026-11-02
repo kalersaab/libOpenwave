@@ -1,14 +1,12 @@
 use super::tables::{CABAC_CONTEXT_INIT_I, CABAC_CONTEXT_INIT_PB};
 use crate::video::h264::slice::SliceType;
 
-
 #[derive(Debug, Clone)]
 pub struct CabacContexts {
     pub states: [(u8, u8); 1024],
 }
 
 impl CabacContexts {
-    
     pub fn new(slice_type: SliceType, cabac_init_idc: u32, slice_qp_y: i32) -> Self {
         let qp = slice_qp_y.clamp(0, 51);
         let mut states = [(0u8, 0u8); 1024];

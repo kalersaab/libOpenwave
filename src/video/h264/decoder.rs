@@ -285,7 +285,6 @@ fn reference_picture<'a>(
         })
 }
 
-
 #[derive(Default)]
 pub struct H264Decoder {
     sequence_parameter_sets: HashMap<u32, Sps>,
@@ -298,7 +297,6 @@ impl H264Decoder {
         Self::default()
     }
 
-    
     pub fn decode_frame(&mut self, data: &[u8]) -> Result<Yuv420Frame, H264DecodeError> {
         let units = parse_annex_b(data)?;
         let mut decoded_frame = None;
@@ -470,7 +468,6 @@ impl H264Decoder {
         Ok(frame)
     }
 
-    
     pub fn reset(&mut self) {
         self.sequence_parameter_sets.clear();
         self.picture_parameter_sets.clear();
@@ -634,7 +631,7 @@ fn validate_decoder_configuration(
         .ok_or(H264DecodeError::InvalidStream)?;
 
     let slice_type_supported = match header.prefix.slice_type {
-        SliceType::I => true, 
+        SliceType::I => true,
         SliceType::P | SliceType::B => !header.prefix.is_idr,
         SliceType::Sp | SliceType::Si => false,
     };
@@ -665,13 +662,11 @@ fn validate_decoder_configuration(
         _ => true,
     };
 
-    
     if !matches!(sps.profile_idc, 66 | 77 | 100) {
         eprintln!("[validate] Unsupported profile: {}", sps.profile_idc);
         return Err(H264DecodeError::UnsupportedFeature);
     }
 
-    
     if sps.chroma_format_idc != 1 {
         eprintln!(
             "[validate] Unsupported chroma_format_idc: {}",
@@ -716,7 +711,6 @@ fn validate_decoder_configuration(
         return Err(H264DecodeError::UnsupportedFeature);
     }
 
-    
     if pps.num_slice_groups != 1 {
         eprintln!("[validate] num_slice_groups: {}", pps.num_slice_groups);
         return Err(H264DecodeError::UnsupportedFeature);
@@ -726,7 +720,6 @@ fn validate_decoder_configuration(
         return Err(H264DecodeError::UnsupportedFeature);
     }
 
-    
     if !slice_type_supported {
         eprintln!(
             "[validate] Unsupported slice_type: {:?}, is_idr={}",
@@ -735,7 +728,6 @@ fn validate_decoder_configuration(
         return Err(H264DecodeError::UnsupportedFeature);
     }
 
-    
     if header.prefix.first_mb_in_slice != 0 {
         eprintln!(
             "[validate] first_mb_in_slice: {}",
@@ -1721,7 +1713,7 @@ fn reconstruct_inter_slice_cabac(
             let mut mvd_cache = vec![[0i32; 2]; macroblock_count as usize];
             let mut prev_qp_delta = 0i32;
             let mut qp_y = initial_qp;
-            
+
             let mut intra4x4_modes = vec![Intra4x4Mode::Dc; (macroblock_count * 16) as usize];
             let mut chroma_pred_modes = vec![0u8; macroblock_count as usize];
             let mut mb_types: Vec<Option<MacroblockType>> = vec![None; macroblock_count as usize];
@@ -1795,7 +1787,6 @@ fn reconstruct_inter_slice_cabac(
 
                     match mb_type_opt {
                         None => {
-                            
                             let ref_a = if mb_x > 0 {
                                 motion_grid
                                     .cell((mb_x as usize - 1) * 4, mb_y as usize * 4)
@@ -2396,9 +2387,6 @@ fn luma_neighbor_context(counts: &[u8], grid_width: usize, x: usize, y: usize) -
     }
 }
 
-
-
-
 #[allow(clippy::too_many_arguments)]
 fn decode_chroma_dc_cabac(
     engine: &mut CabacEngine<'_>,
@@ -2457,8 +2445,6 @@ fn decode_chroma_ac_cabac(
     let mut ac_cb = [[0i32; 16]; 4];
     let mut ac_cr = [[0i32; 16]; 4];
 
-    
-    
     for b_idx in 0..4usize {
         let bx = b_idx % 2;
         let by = b_idx / 2;
@@ -2536,13 +2522,10 @@ fn decode_chroma_ac_cabac(
     Ok((ac_cb, ac_cr))
 }
 
-
 fn scale_chroma_dc(dc_level: i32, qp_c: u8) -> i32 {
-    
-    
     let qp = qp_c as i32;
     let shift = qp / 6;
-    
+
     let v = [10i32, 11, 13, 14, 16, 18][(qp % 6) as usize];
     let scaled = dc_level * v;
     if shift > 0 {
@@ -2551,8 +2534,6 @@ fn scale_chroma_dc(dc_level: i32, qp_c: u8) -> i32 {
         scaled
     }
 }
-
-
 
 #[allow(clippy::too_many_arguments)]
 fn reconstruct_chroma_plane(
@@ -2571,7 +2552,6 @@ fn reconstruct_chroma_plane(
     let cx = mb_x * 8;
     let cy = mb_y * 8;
 
-    
     let top_row: Option<[u8; 8]> = (mb_y > 0).then(|| {
         std::array::from_fn(|i| {
             let offset = ((cy - 1) * frame_width + cx + i as u32) as usize;
@@ -2593,7 +2573,6 @@ fn reconstruct_chroma_plane(
         })
     });
 
-    
     let pred_dc = |tr: Option<&[u8]>, lc: Option<&[u8]>| -> u8 {
         let sum: u32 = tr
             .iter()
@@ -2609,7 +2588,6 @@ fn reconstruct_chroma_plane(
         }
     };
 
-    
     let pred: [u8; 4] = match (top_row, left_col) {
         (Some(ref t), Some(ref l)) => [
             pred_dc(Some(&t[..4]), Some(&l[..4])),
@@ -2632,12 +2610,9 @@ fn reconstruct_chroma_plane(
         (None, None) => [128u8; 4],
     };
 
-    
     let dc_transformed = inverse_hadamard_2x2(dc_coeffs);
     let dc_scaled: [i32; 4] = std::array::from_fn(|i| scale_chroma_dc(dc_transformed[i], qp_c));
 
-    
-    
     for b_idx in 0..4usize {
         let bx = (b_idx % 2) as u32;
         let by = (b_idx / 2) as u32;
@@ -2647,9 +2622,8 @@ fn reconstruct_chroma_plane(
         let gx = mb_x as usize * 2 + bx as usize;
         let gy = mb_y as usize * 2 + by as usize;
 
-        
         let mut scaled_ac = inverse_scale_4x4(&ac_blocks[b_idx], qp_c, None)?;
-        scaled_ac[0] = dc_scaled[b_idx]; 
+        scaled_ac[0] = dc_scaled[b_idx];
         let residual = inverse_transform_4x4(&scaled_ac)?;
 
         let dc_pred = pred[b_idx];
@@ -2670,14 +2644,13 @@ fn reconstruct_chroma_plane(
                     dc_pred as i32
                 } else {
                     dc_pred as i32
-                }; 
+                };
                 target[pixel_idx] = (pred_val + r).clamp(0, 255) as u8;
             }
         }
     }
     Ok(())
 }
-
 
 #[allow(clippy::too_many_arguments)]
 fn reconstruct_chroma_blocks(
@@ -2806,20 +2779,16 @@ fn reconstruct_chroma_dc(
     Ok(())
 }
 
-
 fn inverse_hadamard_2x2(input: &[i32; 4]) -> [i32; 4] {
     let a = input[0] + input[1] + input[2] + input[3];
     let b = input[0] - input[1] + input[2] - input[3];
     let c = input[0] + input[1] - input[2] - input[3];
     let d = input[0] - input[1] - input[2] + input[3];
-    
+
     [a, b, c, d]
 }
 
-
-
 fn chroma_qp_from_luma(qp_y: i32, chroma_qp_index_offset: i32) -> u8 {
-    
     const CHROMA_QP_TABLE: [u8; 52] = [
         0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
         25, 26, 27, 28, 29, 29, 30, 31, 32, 32, 33, 34, 34, 35, 35, 36, 36, 37, 37, 37, 38, 38, 38,

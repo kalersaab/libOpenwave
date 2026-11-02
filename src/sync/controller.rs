@@ -179,7 +179,6 @@ mod tests {
         controller.start();
         controller.update_audio_clock(0);
 
-        
         let action = controller.schedule_video_frame(0);
         assert_eq!(action, FrameAction::DisplayNow);
     }
@@ -188,9 +187,8 @@ mod tests {
     fn calculates_sync_drift() {
         let controller = SyncController::new(48000, 90000, 48000, 30.0);
 
-        controller.update_audio_clock(24000); 
+        controller.update_audio_clock(24000);
 
-        
         let drift = controller.sync_drift(90000);
         assert_eq!(drift, 500);
     }
@@ -200,7 +198,7 @@ mod tests {
         let mut controller = SyncController::new(48000, 90000, 48000, 30.0);
 
         controller.start();
-        controller.update_audio_clock(48000); 
+        controller.update_audio_clock(48000);
 
         controller.seek(5.0);
         assert_eq!(controller.state(), StreamState::Seeking);

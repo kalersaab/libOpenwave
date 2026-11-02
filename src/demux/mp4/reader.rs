@@ -49,8 +49,6 @@ impl<R: Read + Seek> Mp4Reader<R> {
 
             let content_size = header.size - header.header_size;
 
-            
-            
             if pos + header.size > file_size && header.box_type != BoxType::MDAT {
                 eprintln!(
                     "[MP4Reader] Warning: Box at {} with size {} extends beyond file (file size: {})",
@@ -59,7 +57,6 @@ impl<R: Read + Seek> Mp4Reader<R> {
                 return Err(Mp4Error::InvalidFormat("Box size extends beyond file"));
             }
 
-            
             let actual_content_size =
                 if header.box_type == BoxType::MDAT && pos + header.size > file_size {
                     file_size.saturating_sub(pos + header.header_size)
@@ -86,7 +83,6 @@ impl<R: Read + Seek> Mp4Reader<R> {
                         after_moov_pos, expected_pos
                     );
 
-                    
                     if after_moov_pos != expected_pos {
                         eprintln!(
                             "[MP4Reader] Position mismatch after moov! Seeking to {}",
@@ -167,7 +163,6 @@ impl<R: Read + Seek> Mp4Reader<R> {
                         content_size, bytes_read
                     );
 
-                    
                     if bytes_read != content_size {
                         let expected_pos = trak_start + content_size;
                         eprintln!(
@@ -242,7 +237,6 @@ impl<R: Read + Seek> Mp4Reader<R> {
                 }
             }
 
-            
             let current_pos = reader.stream_position()?;
             if current_pos > box_end {
                 eprintln!(
@@ -298,7 +292,6 @@ impl<R: Read + Seek> Mp4Reader<R> {
                 }
             }
 
-            
             let current_pos = reader.stream_position()?;
             if current_pos > box_end {
                 eprintln!(
@@ -338,7 +331,6 @@ impl<R: Read + Seek> Mp4Reader<R> {
                 skip_bytes(reader, content_size)?;
             }
 
-            
             let current_pos = reader.stream_position()?;
             if current_pos > box_end {
                 eprintln!(
@@ -399,7 +391,6 @@ impl<R: Read + Seek> Mp4Reader<R> {
                 }
             }
 
-            
             let current_pos = reader.stream_position()?;
             if current_pos > box_end {
                 eprintln!(
@@ -409,10 +400,9 @@ impl<R: Read + Seek> Mp4Reader<R> {
                     current_pos,
                     current_pos - box_end
                 );
-                
+
                 reader.seek(std::io::SeekFrom::Start(box_end))?;
             } else if current_pos < box_end {
-                
                 skip_bytes(reader, box_end - current_pos)?;
             }
         }

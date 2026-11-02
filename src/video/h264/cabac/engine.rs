@@ -1,7 +1,6 @@
 use super::tables::{RANGE_TAB_LPS, TRANS_IDX_LPS, TRANS_IDX_MPS};
 use crate::video::h264::decoder::H264DecodeError;
 
-
 #[derive(Debug)]
 pub struct CabacEngine<'a> {
     data: &'a [u8],
@@ -13,8 +12,6 @@ pub struct CabacEngine<'a> {
 }
 
 impl<'a> CabacEngine<'a> {
-    
-    
     pub fn new(data: &'a [u8]) -> Result<Self, H264DecodeError> {
         let mut engine = Self {
             data,
