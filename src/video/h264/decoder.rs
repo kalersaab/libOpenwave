@@ -3,16 +3,29 @@ use std::collections::HashMap;
 use crate::video::{
     bitstream::{BitReader, BitstreamError},
     h264::{
+        cabac::{
+            CabacContexts, CabacEngine, ResidualCategory, decode_cabac_cbp,
+            decode_cabac_chroma_pred_mode, decode_cabac_mb_qp_delta, decode_cabac_mvd,
+            decode_cabac_ref_idx, decode_cabac_residual_block, decode_i_slice_mb_type,
+            decode_intra4x4_pred_mode, decode_mb_skip_flag, decode_p_slice_mb_type,
+        },
         cavlc::{CavlcError, Residual4x4Kind, decode_residual_4x4},
         frame::{ColorPlane, FrameError, Yuv420Frame},
-        intra::{Intra16x16Mode, Intra16x16References, IntraPredictionError, predict_intra16x16},
+        intra::{
+            Intra4x4Mode, Intra4x4Reconstruction, Intra4x4References, Intra16x16Mode,
+            Intra16x16References, IntraPredictionError, IntraReconstructionError,
+            predict_intra16x16, reconstruct_intra4x4_block,
+        },
         macroblock::{MacroblockParseError, MacroblockType, parse_p_macroblock},
         motion::{chroma::interpolate_chroma_sample, luma::interpolate_luma_sample},
         nal::{AnnexBError, NalUnitType, parse_annex_b},
         pps::{Pps, PpsError, parse_pps},
         slice::{SliceError, SliceType, parse_slice_header},
         sps::{Sps, SpsError, parse_sps},
-        transform::{TransformError, inverse_scale_4x4, inverse_transform_4x4},
+        transform::{
+            TransformError, inverse_scale_4x4, inverse_scale_luma_dc, inverse_transform_4x4,
+            reconstruct_residual_4x4,
+        },
     },
 };
 
@@ -272,6 +285,199 @@ fn reference_picture<'a>(
         })
 }
 
+
+#[derive(Default)]
+pub struct H264Decoder {
+    sequence_parameter_sets: HashMap<u32, Sps>,
+    picture_parameter_sets: HashMap<u32, Pps>,
+    reference_pictures: ReferencePictureBuffer,
+}
+
+impl H264Decoder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    
+    pub fn decode_frame(&mut self, data: &[u8]) -> Result<Yuv420Frame, H264DecodeError> {
+        let units = parse_annex_b(data)?;
+        let mut decoded_frame = None;
+
+        eprintln!("[H264Decoder] decode_frame: {} NAL units", units.len());
+
+        for (i, unit) in units.iter().enumerate() {
+            eprintln!(
+                "[H264Decoder] NAL unit {}: type={:?}",
+                i, unit.header.unit_type
+            );
+
+            match unit.header.unit_type {
+                NalUnitType::Sps => {
+                    let sps = parse_sps(unit.data)?;
+                    eprintln!("[H264Decoder] SPS: id={}", sps.id);
+                    self.sequence_parameter_sets.insert(sps.id, sps);
+                }
+                NalUnitType::Pps => {
+                    let pps = parse_pps(unit.data)?;
+                    eprintln!("[H264Decoder] PPS: id={}, sps_id={}", pps.id, pps.sps_id);
+                    self.picture_parameter_sets.insert(pps.id, pps);
+                }
+                NalUnitType::Idr | NalUnitType::CodedSliceNonIdr => {
+                    eprintln!(
+                        "[H264Decoder] Decoding slice (NAL type={:?})",
+                        unit.header.unit_type
+                    );
+                    let frame = self.decode_slice(unit)?;
+                    decoded_frame = Some(frame);
+                }
+                NalUnitType::CodedSliceDataPartitionA
+                | NalUnitType::CodedSliceDataPartitionB
+                | NalUnitType::CodedSliceDataPartitionC
+                | NalUnitType::Unspecified
+                | NalUnitType::Other(_) => {
+                    eprintln!(
+                        "[H264Decoder] Unsupported NAL type: {:?}",
+                        unit.header.unit_type
+                    );
+                    return Err(H264DecodeError::UnsupportedFeature);
+                }
+                NalUnitType::Sei
+                | NalUnitType::Aud
+                | NalUnitType::EndOfSequence
+                | NalUnitType::EndOfStream
+                | NalUnitType::Filler => {
+                    eprintln!(
+                        "[H264Decoder] Skipping NAL type: {:?}",
+                        unit.header.unit_type
+                    );
+                }
+            }
+        }
+
+        decoded_frame.ok_or(H264DecodeError::MissingIdrSlice)
+    }
+
+    fn decode_slice(
+        &mut self,
+        unit: &crate::video::h264::nal::NalUnit,
+    ) -> Result<Yuv420Frame, H264DecodeError> {
+        let prefix = crate::video::h264::slice::parse_slice_prefix(unit.data)?;
+        let pps = self
+            .picture_parameter_sets
+            .get(&prefix.pps_id)
+            .ok_or(H264DecodeError::MissingParameterSet)?;
+        let sps = self
+            .sequence_parameter_sets
+            .get(&pps.sps_id)
+            .ok_or(H264DecodeError::MissingParameterSet)?;
+        let header = parse_slice_header(unit.data, sps, pps)?;
+        validate_decoder_configuration(sps, pps, &header)?;
+
+        let rbsp = ebsp_to_rbsp(&unit.data[1..]);
+        let mut reader = BitReader::new(&rbsp);
+        reader.skip_bits(header.slice_data_bit_offset)?;
+
+        if prefix.is_idr {
+            self.reference_pictures.clear();
+        }
+        let max_frame_num = 1u32
+            .checked_shl(sps.log2_max_frame_num)
+            .ok_or(H264DecodeError::InvalidStream)?;
+        let current_pic_order_cnt = i64::from(header.pic_order_cnt_lsb.unwrap_or(header.frame_num));
+        let max_pic_order_cnt = if sps.pic_order_cnt_type == 0 {
+            Some(
+                1i64.checked_shl(sps.log2_max_pic_order_cnt_lsb)
+                    .ok_or(H264DecodeError::InvalidStream)?,
+            )
+        } else {
+            None
+        };
+        let (list0_count, list1_count) =
+            if matches!(header.prefix.slice_type, SliceType::P | SliceType::B) {
+                (header.num_ref_idx_l0_active, header.num_ref_idx_l1_active)
+            } else {
+                (0, 0)
+            };
+        let reference_lists = ReferencePictureLists::build(
+            self.reference_pictures.pictures(),
+            ReferencePictureListConfig {
+                slice_type: header.prefix.slice_type,
+                current_frame_num: header.frame_num,
+                max_frame_num,
+                current_pic_order_cnt,
+                max_pic_order_cnt,
+                list0_count,
+                list1_count,
+            },
+        )?;
+
+        eprintln!(
+            "[H264Decoder] Decoding slice: type={:?}, is_idr={}, frame_num={}",
+            header.prefix.slice_type, prefix.is_idr, header.frame_num
+        );
+
+        let frame = if pps.entropy_coding_mode {
+            match (header.prefix.slice_type, prefix.is_idr) {
+                (SliceType::I, _) => reconstruct_slice_cabac(&rbsp, sps, pps, &header)?,
+                (SliceType::P, false) | (SliceType::B, false) => {
+                    reconstruct_inter_slice_cabac(&rbsp, sps, pps, &header, &reference_lists)?
+                }
+                _ => {
+                    eprintln!(
+                        "[H264Decoder] Unsupported CABAC: slice_type={:?}, is_idr={}",
+                        header.prefix.slice_type, prefix.is_idr
+                    );
+                    return Err(H264DecodeError::UnsupportedFeature);
+                }
+            }
+        } else {
+            match (header.prefix.slice_type, prefix.is_idr) {
+                (SliceType::I, true) => reconstruct_slice(&mut reader, sps, pps, &header)?,
+                (SliceType::I, false) => reconstruct_slice(&mut reader, sps, pps, &header)?,
+                (SliceType::P, false) | (SliceType::B, false) => {
+                    reconstruct_inter_slice(&mut reader, sps, &header, &reference_lists)?
+                }
+                _ => {
+                    eprintln!(
+                        "[H264Decoder] Unsupported: slice_type={:?}, is_idr={}",
+                        header.prefix.slice_type, prefix.is_idr
+                    );
+                    return Err(H264DecodeError::UnsupportedFeature);
+                }
+            }
+        };
+
+        if unit.header.nal_ref_idc != 0 {
+            let long_term_frame_idx = header
+                .dec_ref_pic_marking
+                .as_ref()
+                .and_then(|marking| marking.long_term_reference_flag)
+                .filter(|&is_long_term| prefix.is_idr && is_long_term)
+                .map(|_| 0);
+            self.reference_pictures.insert(
+                ReferencePicture {
+                    frame_num: header.frame_num,
+                    pic_order_cnt: current_pic_order_cnt,
+                    long_term_frame_idx,
+                    frame: copy_frame(&frame)?,
+                },
+                sps.max_num_ref_frames,
+                header.frame_num,
+                max_frame_num,
+            )?;
+        }
+
+        Ok(frame)
+    }
+
+    
+    pub fn reset(&mut self) {
+        self.sequence_parameter_sets.clear();
+        self.picture_parameter_sets.clear();
+        self.reference_pictures.clear();
+    }
+}
+
 pub fn decode_annex_b(data: &[u8]) -> Result<Yuv420Frame, H264DecodeError> {
     decode_annex_b_frames(data)?
         .into_iter()
@@ -345,14 +551,29 @@ pub fn decode_annex_b_frames(data: &[u8]) -> Result<Vec<Yuv420Frame>, H264Decode
                         list1_count,
                     },
                 )?;
-                let frame = match header.prefix.slice_type {
-                    SliceType::I if prefix.is_idr => {
-                        reconstruct_slice(&mut reader, sps, pps, &header)?
+                let frame = if pps.entropy_coding_mode {
+                    match (header.prefix.slice_type, prefix.is_idr) {
+                        (SliceType::I, _) => reconstruct_slice_cabac(&rbsp, sps, pps, &header)?,
+                        (SliceType::P, false) | (SliceType::B, false) => {
+                            reconstruct_inter_slice_cabac(
+                                &rbsp,
+                                sps,
+                                pps,
+                                &header,
+                                &reference_lists,
+                            )?
+                        }
+                        _ => return Err(H264DecodeError::UnsupportedFeature),
                     }
-                    SliceType::P | SliceType::B if !prefix.is_idr => {
-                        reconstruct_inter_slice(&mut reader, sps, &header, &reference_lists)?
+                } else {
+                    match (header.prefix.slice_type, prefix.is_idr) {
+                        (SliceType::I, true) => reconstruct_slice(&mut reader, sps, pps, &header)?,
+                        (SliceType::I, false) => reconstruct_slice(&mut reader, sps, pps, &header)?,
+                        (SliceType::P, false) | (SliceType::B, false) => {
+                            reconstruct_inter_slice(&mut reader, sps, &header, &reference_lists)?
+                        }
+                        _ => return Err(H264DecodeError::UnsupportedFeature),
                     }
-                    _ => return Err(H264DecodeError::UnsupportedFeature),
                 };
 
                 if unit.header.nal_ref_idc != 0 {
@@ -413,49 +634,153 @@ fn validate_decoder_configuration(
         .ok_or(H264DecodeError::InvalidStream)?;
 
     let slice_type_supported = match header.prefix.slice_type {
-        SliceType::I => header.prefix.is_idr,
+        SliceType::I => true, 
         SliceType::P | SliceType::B => !header.prefix.is_idr,
         SliceType::Sp | SliceType::Si => false,
     };
     let inter_header_supported = match header.prefix.slice_type {
         SliceType::P => {
-            header.ref_pic_list_modification_l0.is_empty() && header.pred_weight_table.is_none()
+            let weights_default = header.pred_weight_table.as_ref().is_none_or(|t| {
+                t.list0
+                    .iter()
+                    .all(|w| w.luma.is_none() && w.chroma.is_none())
+            });
+            header.ref_pic_list_modification_l0.is_empty() && weights_default
         }
         SliceType::B => {
+            let weights_default = header.pred_weight_table.as_ref().is_none_or(|t| {
+                t.list0
+                    .iter()
+                    .all(|w| w.luma.is_none() && w.chroma.is_none())
+                    && t.list1
+                        .iter()
+                        .all(|w| w.luma.is_none() && w.chroma.is_none())
+            });
             header.num_ref_idx_l0_active == 1
                 && header.num_ref_idx_l1_active == 1
                 && header.ref_pic_list_modification_l0.is_empty()
                 && header.ref_pic_list_modification_l1.is_empty()
-                && header.pred_weight_table.is_none()
+                && weights_default
         }
         _ => true,
     };
 
-    if !matches!(sps.profile_idc, 66 | 77)
-        || sps.chroma_format_idc != 1
-        || sps.separate_colour_plane
-        || sps.bit_depth_luma != 8
-        || sps.bit_depth_chroma != 8
-        || !sps.frame_mbs_only
-        || sps.width != coded_width
-        || sps.height != coded_height
-        || pps.entropy_coding_mode
-        || pps.num_slice_groups != 1
-        || sps.max_num_ref_frames > 2
-        || !slice_type_supported
-        || header.prefix.first_mb_in_slice != 0
-        || header.field_pic_flag
-        || header.redundant_pic_cnt.unwrap_or(0) != 0
-        || !inter_header_supported
-        || header.dec_ref_pic_marking.as_ref().is_some_and(|marking| {
-            !header.prefix.is_idr
-                && (marking.adaptive_ref_pic_marking_mode_flag || !marking.operations.is_empty())
-        })
-        || (header.prefix.slice_type == SliceType::B && pps.weighted_bipred_idc != 0)
-        || header
-            .deblocking_filter
-            .is_none_or(|parameters| parameters.disable_deblocking_filter_idc != 1)
+    
+    if !matches!(sps.profile_idc, 66 | 77 | 100) {
+        eprintln!("[validate] Unsupported profile: {}", sps.profile_idc);
+        return Err(H264DecodeError::UnsupportedFeature);
+    }
+
+    
+    if sps.chroma_format_idc != 1 {
+        eprintln!(
+            "[validate] Unsupported chroma_format_idc: {}",
+            sps.chroma_format_idc
+        );
+        return Err(H264DecodeError::UnsupportedFeature);
+    }
+    if sps.separate_colour_plane {
+        eprintln!("[validate] separate_colour_plane not supported");
+        return Err(H264DecodeError::UnsupportedFeature);
+    }
+    if sps.bit_depth_luma != 8 {
+        eprintln!(
+            "[validate] Unsupported bit_depth_luma: {}",
+            sps.bit_depth_luma
+        );
+        return Err(H264DecodeError::UnsupportedFeature);
+    }
+    if sps.bit_depth_chroma != 8 {
+        eprintln!(
+            "[validate] Unsupported bit_depth_chroma: {}",
+            sps.bit_depth_chroma
+        );
+        return Err(H264DecodeError::UnsupportedFeature);
+    }
+    if !sps.frame_mbs_only {
+        eprintln!("[validate] frame_mbs_only=false not supported (interlaced)");
+        return Err(H264DecodeError::UnsupportedFeature);
+    }
+    if sps.width != coded_width {
+        eprintln!(
+            "[validate] width mismatch: {} != {}",
+            sps.width, coded_width
+        );
+        return Err(H264DecodeError::UnsupportedFeature);
+    }
+    if sps.height != coded_height {
+        eprintln!(
+            "[validate] height mismatch: {} != {}",
+            sps.height, coded_height
+        );
+        return Err(H264DecodeError::UnsupportedFeature);
+    }
+
+    
+    if pps.num_slice_groups != 1 {
+        eprintln!("[validate] num_slice_groups: {}", pps.num_slice_groups);
+        return Err(H264DecodeError::UnsupportedFeature);
+    }
+    if sps.max_num_ref_frames > 16 {
+        eprintln!("[validate] max_num_ref_frames: {}", sps.max_num_ref_frames);
+        return Err(H264DecodeError::UnsupportedFeature);
+    }
+
+    
+    if !slice_type_supported {
+        eprintln!(
+            "[validate] Unsupported slice_type: {:?}, is_idr={}",
+            header.prefix.slice_type, header.prefix.is_idr
+        );
+        return Err(H264DecodeError::UnsupportedFeature);
+    }
+
+    
+    if header.prefix.first_mb_in_slice != 0 {
+        eprintln!(
+            "[validate] first_mb_in_slice: {}",
+            header.prefix.first_mb_in_slice
+        );
+        return Err(H264DecodeError::UnsupportedFeature);
+    }
+    if header.field_pic_flag {
+        eprintln!("[validate] field_pic_flag=true (interlaced)");
+        return Err(H264DecodeError::UnsupportedFeature);
+    }
+    if header.redundant_pic_cnt.unwrap_or(0) != 0 {
+        eprintln!(
+            "[validate] redundant_pic_cnt: {:?}",
+            header.redundant_pic_cnt
+        );
+        return Err(H264DecodeError::UnsupportedFeature);
+    }
+    if !inter_header_supported {
+        eprintln!(
+            "[validate] inter_header not supported for {:?}: ref_pic_list_modification_l0={:?}, pred_weight_table={:?}",
+            header.prefix.slice_type, header.ref_pic_list_modification_l0, header.pred_weight_table,
+        );
+        return Err(H264DecodeError::UnsupportedFeature);
+    }
+    if header.dec_ref_pic_marking.as_ref().is_some_and(|marking| {
+        !header.prefix.is_idr
+            && (marking.adaptive_ref_pic_marking_mode_flag || !marking.operations.is_empty())
+    }) {
+        eprintln!("[validate] dec_ref_pic_marking not supported");
+        return Err(H264DecodeError::UnsupportedFeature);
+    }
+    if header.prefix.slice_type == SliceType::B && pps.weighted_bipred_idc != 0 {
+        eprintln!(
+            "[validate] weighted_bipred_idc: {}",
+            pps.weighted_bipred_idc
+        );
+        return Err(H264DecodeError::UnsupportedFeature);
+    }
+    if header
+        .deblocking_filter
+        .as_ref()
+        .is_some_and(|parameters| parameters.disable_deblocking_filter_idc > 2)
     {
+        eprintln!("[validate] invalid disable_deblocking_filter_idc");
         return Err(H264DecodeError::UnsupportedFeature);
     }
 
@@ -531,7 +856,7 @@ fn reconstruct_slice(
         let mb_x = macroblock_address % sps.pic_width_in_mbs;
         let mb_y = macroblock_address / sps.pic_width_in_mbs;
         let dc_block = decode_residual_4x4(reader, Some(0), Residual4x4Kind::Full)?;
-        let dc_coefficients = inverse_scale_4x4(&dc_block.coeff_levels, qp_y_u8, None)?;
+        let dc_coefficients = inverse_scale_luma_dc(&dc_block.coeff_levels, qp_y_u8, None)?;
         let dc_transform = inverse_hadamard_4x4(&dc_coefficients)?;
         let mut ac_blocks = [[0i32; 16]; 16];
 
@@ -579,14 +904,18 @@ fn reconstruct_slice(
         } else {
             Some(frame.y[((y - 1) * frame.width + x - 1) as usize])
         };
-        let prediction = predict_intra16x16(
-            prediction_mode,
-            Intra16x16References {
-                top,
-                left,
-                top_left,
-            },
-        )?;
+        let refs16 = Intra16x16References {
+            top,
+            left,
+            top_left,
+        };
+        let prediction = predict_intra16x16(prediction_mode, refs16).or_else(|e| {
+            if matches!(e, IntraPredictionError::MissingReference) {
+                predict_intra16x16(Intra16x16Mode::Dc, refs16)
+            } else {
+                Err(e)
+            }
+        })?;
 
         for block_index in 0..16usize {
             let block_x = block_index % 4;
@@ -724,6 +1053,957 @@ fn reconstruct_inter_slice(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn decode_and_reconstruct_intra16x16_cabac(
+    engine: &mut CabacEngine<'_>,
+    contexts: &mut CabacContexts,
+    frame: &mut Yuv420Frame,
+    sps: &Sps,
+    pps: &Pps,
+    mb_x: u32,
+    mb_y: u32,
+    macroblock_address: u32,
+    prediction_mode: crate::video::h264::macroblock::types::Intra16x16Mode,
+    coded_chroma_pattern: u8,
+    coded_luma_pattern: u8,
+    prev_qp_delta: &mut i32,
+    qp_y: &mut i32,
+    grid_width: usize,
+    chroma_grid_w: usize,
+    cbp_cache: &mut [u32],
+    chroma_pred_modes: &mut [u8],
+    luma_nonzero_counts: &mut [u8],
+    cb_nonzero_counts: &mut [u8],
+    cr_nonzero_counts: &mut [u8],
+) -> Result<(), H264DecodeError> {
+    let cbp_luma = if coded_luma_pattern != 0 { 0x0F } else { 0 };
+    let cbp_chroma = (coded_chroma_pattern as u32) << 4;
+    cbp_cache[macroblock_address as usize] = cbp_luma | cbp_chroma;
+    let left_chroma = if mb_x > 0 {
+        chroma_pred_modes[macroblock_address as usize - 1]
+    } else {
+        0
+    };
+    let top_chroma = if mb_y > 0 {
+        chroma_pred_modes[macroblock_address as usize - sps.pic_width_in_mbs as usize]
+    } else {
+        0
+    };
+    let chroma_mode = decode_cabac_chroma_pred_mode(engine, contexts, left_chroma, top_chroma)?;
+    chroma_pred_modes[macroblock_address as usize] = chroma_mode;
+
+    let qp_delta = decode_cabac_mb_qp_delta(engine, contexts, *prev_qp_delta)?;
+    *prev_qp_delta = qp_delta;
+    *qp_y = (*qp_y + qp_delta).rem_euclid(52);
+    let qp_y_u8 = u8::try_from(*qp_y).map_err(|_| H264DecodeError::InvalidStream)?;
+    let qp_c = chroma_qp_from_luma(*qp_y, pps.chroma_qp_index_offset);
+
+    let left_has_dc = if mb_x > 0 {
+        (cbp_cache[macroblock_address as usize - 1] & 0x100) != 0
+    } else {
+        false
+    };
+    let top_has_dc = if mb_y > 0 {
+        (cbp_cache[macroblock_address as usize - sps.pic_width_in_mbs as usize] & 0x100) != 0
+    } else {
+        false
+    };
+
+    let (dc_block, dc_nnz) = decode_cabac_residual_block(
+        engine,
+        contexts,
+        ResidualCategory::LumaDc,
+        left_has_dc,
+        top_has_dc,
+    )?;
+    if dc_nnz > 0 {
+        cbp_cache[macroblock_address as usize] |= 0x100;
+    }
+
+    let dc_coefficients = inverse_scale_luma_dc(&dc_block, qp_y_u8, None)?;
+    let dc_transform = inverse_hadamard_4x4(&dc_coefficients)?;
+    let mut ac_blocks = [[0i32; 16]; 16];
+
+    if coded_luma_pattern != 0 {
+        for (block_index, ac_block) in ac_blocks.iter_mut().enumerate() {
+            let block_x = block_index % 4;
+            let block_y = block_index / 4;
+            let grid_x = mb_x as usize * 4 + block_x;
+            let grid_y = mb_y as usize * 4 + block_y;
+
+            let cond_a = if grid_x > 0 {
+                luma_nonzero_counts[grid_y * grid_width + grid_x - 1] > 0
+            } else {
+                false
+            };
+            let cond_b = if grid_y > 0 {
+                luma_nonzero_counts[(grid_y - 1) * grid_width + grid_x] > 0
+            } else {
+                false
+            };
+
+            let (block, nnz) = decode_cabac_residual_block(
+                engine,
+                contexts,
+                ResidualCategory::LumaAc,
+                cond_a,
+                cond_b,
+            )?;
+            luma_nonzero_counts[grid_y * grid_width + grid_x] = nnz as u8;
+            *ac_block = block;
+        }
+    }
+
+    let (chroma_dc_cb, chroma_dc_cr) = decode_chroma_dc_cabac(
+        engine,
+        contexts,
+        u32::from(coded_chroma_pattern),
+        mb_x,
+        mb_y,
+        sps.pic_width_in_mbs,
+        cbp_cache,
+    )?;
+    let (chroma_ac_cb, chroma_ac_cr) = if coded_chroma_pattern >= 2 {
+        decode_chroma_ac_cabac(
+            engine,
+            contexts,
+            mb_x,
+            mb_y,
+            chroma_grid_w,
+            cb_nonzero_counts,
+            cr_nonzero_counts,
+        )?
+    } else {
+        ([[0i32; 16]; 4], [[0i32; 16]; 4])
+    };
+
+    let x = mb_x * 16;
+    let y = mb_y * 16;
+    let top = if mb_y == 0 {
+        None
+    } else {
+        Some(std::array::from_fn(|index| {
+            frame.y[((y - 1) * frame.width + x + index as u32) as usize]
+        }))
+    };
+    let left = if mb_x == 0 {
+        None
+    } else {
+        Some(std::array::from_fn(|index| {
+            frame.y[((y + index as u32) * frame.width + x - 1) as usize]
+        }))
+    };
+    let top_left = if mb_x == 0 || mb_y == 0 {
+        None
+    } else {
+        Some(frame.y[((y - 1) * frame.width + x - 1) as usize])
+    };
+    let intra_mode = match prediction_mode {
+        crate::video::h264::macroblock::types::Intra16x16Mode::Vertical => Intra16x16Mode::Vertical,
+        crate::video::h264::macroblock::types::Intra16x16Mode::Horizontal => {
+            Intra16x16Mode::Horizontal
+        }
+        crate::video::h264::macroblock::types::Intra16x16Mode::Dc => Intra16x16Mode::Dc,
+        crate::video::h264::macroblock::types::Intra16x16Mode::Plane => Intra16x16Mode::Plane,
+    };
+    let refs16 = Intra16x16References {
+        top,
+        left,
+        top_left,
+    };
+    let prediction = predict_intra16x16(intra_mode, refs16).or_else(|e| {
+        if matches!(e, IntraPredictionError::MissingReference) {
+            predict_intra16x16(Intra16x16Mode::Dc, refs16)
+        } else {
+            Err(e)
+        }
+    })?;
+
+    for block_index in 0..16usize {
+        let block_x = block_index % 4;
+        let block_y = block_index / 4;
+        let mut scaled = inverse_scale_4x4(&ac_blocks[block_index], qp_y_u8, None)?;
+        scaled[0] = dc_transform[block_index];
+        let residual = inverse_transform_4x4(&scaled)?;
+        let prediction_block = std::array::from_fn(|index| {
+            prediction[block_y * 4 + index / 4][block_x * 4 + index % 4]
+        });
+        frame.reconstruct_block4x4(
+            ColorPlane::Y,
+            x + (block_x * 4) as u32,
+            y + (block_y * 4) as u32,
+            &prediction_block,
+            &residual,
+        )?;
+    }
+
+    reconstruct_chroma_blocks(
+        frame,
+        mb_x,
+        mb_y,
+        chroma_mode,
+        &chroma_dc_cb,
+        &chroma_dc_cr,
+        &chroma_ac_cb,
+        &chroma_ac_cr,
+        qp_c,
+        chroma_grid_w,
+        cb_nonzero_counts,
+        cr_nonzero_counts,
+    )?;
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decode_and_reconstruct_intra4x4_cabac(
+    engine: &mut CabacEngine<'_>,
+    contexts: &mut CabacContexts,
+    frame: &mut Yuv420Frame,
+    sps: &Sps,
+    pps: &Pps,
+    mb_x: u32,
+    mb_y: u32,
+    macroblock_address: u32,
+    prev_qp_delta: &mut i32,
+    qp_y: &mut i32,
+    grid_width: usize,
+    chroma_grid_w: usize,
+    cbp_cache: &mut [u32],
+    chroma_pred_modes: &mut [u8],
+    intra4x4_modes: &mut [Intra4x4Mode],
+    mb_types: &[Option<MacroblockType>],
+    luma_nonzero_counts: &mut [u8],
+    cb_nonzero_counts: &mut [u8],
+    cr_nonzero_counts: &mut [u8],
+) -> Result<(), H264DecodeError> {
+    let mut modes = [Intra4x4Mode::Dc; 16];
+    for b_idx in 0..16 {
+        let b_8x8 = b_idx / 4;
+        let b_4x4 = b_idx % 4;
+        let bx = (b_8x8 % 2) * 2 + (b_4x4 % 2);
+        let by = (b_8x8 / 2) * 2 + (b_4x4 / 2);
+        let gx = mb_x as usize * 4 + bx;
+        let gy = mb_y as usize * 4 + by;
+
+        let pred_a = if bx > 0 {
+            Some(intra4x4_modes[gy * grid_width + (gx - 1)])
+        } else if mb_x > 0 {
+            match mb_types[macroblock_address as usize - 1] {
+                Some(MacroblockType::Intra4x4) => Some(intra4x4_modes[gy * grid_width + (gx - 1)]),
+                Some(MacroblockType::Intra16x16 { .. }) => Some(Intra4x4Mode::Dc),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        let pred_b = if by > 0 {
+            Some(intra4x4_modes[(gy - 1) * grid_width + gx])
+        } else if mb_y > 0 {
+            match mb_types[macroblock_address as usize - sps.pic_width_in_mbs as usize] {
+                Some(MacroblockType::Intra4x4) => Some(intra4x4_modes[(gy - 1) * grid_width + gx]),
+                Some(MacroblockType::Intra16x16 { .. }) => Some(Intra4x4Mode::Dc),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        let predicted_mode = if let (Some(mode_a), Some(mode_b)) = (pred_a, pred_b) {
+            (mode_a as u8).min(mode_b as u8)
+        } else {
+            2 // DC
+        };
+
+        let mode_val = decode_intra4x4_pred_mode(engine, contexts, predicted_mode)?;
+        let mode = match mode_val {
+            0 => Intra4x4Mode::Vertical,
+            1 => Intra4x4Mode::Horizontal,
+            2 => Intra4x4Mode::Dc,
+            3 => Intra4x4Mode::DiagonalDownLeft,
+            4 => Intra4x4Mode::DiagonalDownRight,
+            5 => Intra4x4Mode::VerticalRight,
+            6 => Intra4x4Mode::HorizontalDown,
+            7 => Intra4x4Mode::VerticalLeft,
+            8 => Intra4x4Mode::HorizontalUp,
+            _ => Intra4x4Mode::Dc,
+        };
+        modes[b_idx] = mode;
+        intra4x4_modes[gy * grid_width + gx] = mode;
+    }
+
+    let left_chroma = if mb_x > 0 {
+        chroma_pred_modes[macroblock_address as usize - 1]
+    } else {
+        0
+    };
+    let top_chroma = if mb_y > 0 {
+        chroma_pred_modes[macroblock_address as usize - sps.pic_width_in_mbs as usize]
+    } else {
+        0
+    };
+    let chroma_mode = decode_cabac_chroma_pred_mode(engine, contexts, left_chroma, top_chroma)?;
+    chroma_pred_modes[macroblock_address as usize] = chroma_mode;
+
+    let left_cbp = if mb_x > 0 {
+        cbp_cache[macroblock_address as usize - 1]
+    } else {
+        0x7CF
+    };
+    let top_cbp = if mb_y > 0 {
+        cbp_cache[macroblock_address as usize - sps.pic_width_in_mbs as usize]
+    } else {
+        0x7CF
+    };
+    let cbp = decode_cabac_cbp(engine, contexts, left_cbp, top_cbp)?;
+    cbp_cache[macroblock_address as usize] = cbp;
+
+    if cbp != 0 {
+        let qp_delta = decode_cabac_mb_qp_delta(engine, contexts, *prev_qp_delta)?;
+        *prev_qp_delta = qp_delta;
+        *qp_y = (*qp_y + qp_delta).rem_euclid(52);
+    } else {
+        *prev_qp_delta = 0;
+    }
+    let qp_y_u8 = u8::try_from(*qp_y).map_err(|_| H264DecodeError::InvalidStream)?;
+    let qp_c = chroma_qp_from_luma(*qp_y, pps.chroma_qp_index_offset);
+    let coded_chroma_pattern = (cbp >> 4) & 0x3;
+
+    for b_idx in 0..16usize {
+        let b_8x8 = b_idx / 4;
+        let b_4x4 = b_idx % 4;
+        let bx = ((b_8x8 % 2) * 2 + (b_4x4 % 2)) as u32;
+        let by = ((b_8x8 / 2) * 2 + (b_4x4 / 2)) as u32;
+        let blk_x = mb_x * 16 + bx * 4;
+        let blk_y = mb_y * 16 + by * 4;
+
+        let gx = mb_x as usize * 4 + bx as usize;
+        let gy = mb_y as usize * 4 + by as usize;
+        let cond_a = if gx > 0 {
+            luma_nonzero_counts[gy * grid_width + gx - 1] > 0
+        } else {
+            false
+        };
+        let cond_b = if gy > 0 {
+            luma_nonzero_counts[(gy - 1) * grid_width + gx] > 0
+        } else {
+            false
+        };
+
+        let (residual_levels, nnz) = if (cbp & (1 << (b_idx / 4))) != 0 {
+            decode_cabac_residual_block(
+                engine,
+                contexts,
+                ResidualCategory::Luma4x4,
+                cond_a,
+                cond_b,
+            )?
+        } else {
+            ([0i32; 16], 0)
+        };
+        luma_nonzero_counts[gy * grid_width + gx] = nnz as u8;
+
+        let has_top = blk_y > 0;
+        let has_left = blk_x > 0;
+        let top = has_top.then(|| {
+            std::array::from_fn(|i| {
+                frame.y[((blk_y - 1) * frame.width + blk_x + i as u32) as usize]
+            })
+        });
+        let left = has_left.then(|| {
+            std::array::from_fn(|i| {
+                frame.y[((blk_y + i as u32) * frame.width + blk_x - 1) as usize]
+            })
+        });
+        let top_left = (has_top && has_left)
+            .then(|| frame.y[((blk_y - 1) * frame.width + blk_x - 1) as usize]);
+        let top_right = if has_top {
+            let raster_in_mb = by as usize * 4 + bx as usize;
+            let avail_tr = match raster_in_mb {
+                3 | 7 | 11 | 15 => false,
+                _ => blk_x + 4 <= frame.width,
+            };
+            if avail_tr {
+                Some(std::array::from_fn(|i| {
+                    frame.y[((blk_y - 1) * frame.width + blk_x + 4 + i as u32) as usize]
+                }))
+            } else {
+                top.map(|t| [t[3], t[3], t[3], t[3]])
+            }
+        } else {
+            None
+        };
+
+        let refs = Intra4x4References {
+            top,
+            left,
+            top_left,
+            top_right,
+        };
+        let result = reconstruct_intra4x4_block(
+            frame,
+            Intra4x4Reconstruction {
+                plane: ColorPlane::Y,
+                x: blk_x,
+                y: blk_y,
+                mode: modes[b_idx],
+                references: refs,
+                quantized_levels: &residual_levels,
+                qp: qp_y_u8,
+                scaling_list: None,
+            },
+        );
+        if let Err(IntraReconstructionError::Prediction(IntraPredictionError::MissingReference)) =
+            result
+        {
+            reconstruct_intra4x4_block(
+                frame,
+                Intra4x4Reconstruction {
+                    plane: ColorPlane::Y,
+                    x: blk_x,
+                    y: blk_y,
+                    mode: Intra4x4Mode::Dc,
+                    references: refs,
+                    quantized_levels: &residual_levels,
+                    qp: qp_y_u8,
+                    scaling_list: None,
+                },
+            )
+            .map_err(|_| H264DecodeError::InvalidStream)?;
+        } else {
+            result.map_err(|_| H264DecodeError::InvalidStream)?;
+        }
+    }
+
+    let (chroma_dc_cb, chroma_dc_cr) = decode_chroma_dc_cabac(
+        engine,
+        contexts,
+        coded_chroma_pattern,
+        mb_x,
+        mb_y,
+        sps.pic_width_in_mbs,
+        cbp_cache,
+    )?;
+    let (chroma_ac_cb, chroma_ac_cr) = if coded_chroma_pattern >= 2 {
+        decode_chroma_ac_cabac(
+            engine,
+            contexts,
+            mb_x,
+            mb_y,
+            chroma_grid_w,
+            cb_nonzero_counts,
+            cr_nonzero_counts,
+        )?
+    } else {
+        ([[0i32; 16]; 4], [[0i32; 16]; 4])
+    };
+
+    reconstruct_chroma_blocks(
+        frame,
+        mb_x,
+        mb_y,
+        chroma_mode,
+        &chroma_dc_cb,
+        &chroma_dc_cr,
+        &chroma_ac_cb,
+        &chroma_ac_cr,
+        qp_c,
+        chroma_grid_w,
+        cb_nonzero_counts,
+        cr_nonzero_counts,
+    )?;
+
+    Ok(())
+}
+
+fn reconstruct_slice_cabac(
+    rbsp: &[u8],
+    sps: &Sps,
+    pps: &Pps,
+    header: &crate::video::h264::slice::SliceHeader,
+) -> Result<Yuv420Frame, H264DecodeError> {
+    let mut frame = Yuv420Frame::new(sps.width, sps.height)?;
+    let macroblock_count = sps
+        .pic_width_in_mbs
+        .checked_mul(sps.pic_height_in_map_units)
+        .ok_or(H264DecodeError::InvalidStream)?;
+    let grid_width = sps
+        .pic_width_in_mbs
+        .checked_mul(4)
+        .ok_or(H264DecodeError::InvalidStream)?;
+    let grid_height = sps
+        .pic_height_in_map_units
+        .checked_mul(4)
+        .ok_or(H264DecodeError::InvalidStream)?;
+    let grid_length = usize::try_from(grid_width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(grid_height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .ok_or(H264DecodeError::InvalidStream)?;
+    // Chroma grid is half of luma in each dimension for 4:2:0
+    let chroma_grid_w = (sps.pic_width_in_mbs * 2) as usize;
+    let chroma_grid_h = (sps.pic_height_in_map_units * 2) as usize;
+    let chroma_grid_len = chroma_grid_w
+        .checked_mul(chroma_grid_h)
+        .ok_or(H264DecodeError::InvalidStream)?;
+    let mut luma_nonzero_counts = vec![0u8; grid_length];
+    let mut cb_nonzero_counts = vec![0u8; chroma_grid_len];
+    let mut cr_nonzero_counts = vec![0u8; chroma_grid_len];
+
+    let byte_offset = header.slice_data_bit_offset / 8;
+    eprintln!(
+        "[CABAC INIT] slice_data_bit_offset={} byte_offset={} rbsp_len={} initial_qp={} cabac_init_idc={:?}",
+        header.slice_data_bit_offset,
+        byte_offset,
+        rbsp.len(),
+        26i32 + pps.pic_init_qp_minus26 + header.slice_qp_delta,
+        header.cabac_init_idc
+    );
+    eprintln!(
+        "[CABAC INIT] First 16 CABAC bytes: {:02x?}",
+        &rbsp[byte_offset..byte_offset.min(rbsp.len()) + (16.min(rbsp.len() - byte_offset))]
+    );
+    if byte_offset >= rbsp.len() {
+        return Err(H264DecodeError::InvalidStream);
+    }
+    let mut engine = CabacEngine::new(&rbsp[byte_offset..])?;
+    let initial_qp = 26i32 + pps.pic_init_qp_minus26 + header.slice_qp_delta;
+    if !(0..=51).contains(&initial_qp) {
+        return Err(H264DecodeError::InvalidStream);
+    }
+    let mut contexts =
+        CabacContexts::new(SliceType::I, header.cabac_init_idc.unwrap_or(0), initial_qp);
+    let mut qp_y = initial_qp;
+    let mut prev_qp_delta = 0i32;
+
+    let mut mb_types = vec![None; macroblock_count as usize];
+    let mut cbp_cache = vec![0u32; macroblock_count as usize];
+    let mut chroma_pred_modes = vec![0u8; macroblock_count as usize];
+    let mut intra4x4_modes = vec![Intra4x4Mode::Dc; (macroblock_count * 16) as usize];
+
+    for macroblock_address in 0..macroblock_count {
+        let mb_x = macroblock_address % sps.pic_width_in_mbs;
+        let mb_y = macroblock_address / sps.pic_width_in_mbs;
+
+        // Log CABAC state at the start of each MB to track divergence
+        eprintln!(
+            "[CABAC STATE] mb_addr={} bits={} range={} offset={}",
+            macroblock_address, engine.bits_consumed, engine.range, engine.offset
+        );
+
+        let left_is_intra16 = mb_x > 0
+            && matches!(
+                mb_types[macroblock_address as usize - 1],
+                Some(MacroblockType::Intra16x16 { .. })
+            );
+        let top_is_intra16 = mb_y > 0
+            && matches!(
+                mb_types[macroblock_address as usize - sps.pic_width_in_mbs as usize],
+                Some(MacroblockType::Intra16x16 { .. })
+            );
+
+        let mb_type =
+            decode_i_slice_mb_type(&mut engine, &mut contexts, left_is_intra16, top_is_intra16)?;
+        mb_types[macroblock_address as usize] = Some(mb_type);
+        eprintln!(
+            "[reconstruct_slice_cabac] mb_addr: {}/{}, mb_type: {:?}",
+            macroblock_address, macroblock_count, mb_type
+        );
+
+        match mb_type {
+            MacroblockType::Intra16x16 {
+                prediction_mode,
+                coded_chroma_pattern,
+                coded_luma_pattern,
+            } => {
+                decode_and_reconstruct_intra16x16_cabac(
+                    &mut engine,
+                    &mut contexts,
+                    &mut frame,
+                    sps,
+                    pps,
+                    mb_x,
+                    mb_y,
+                    macroblock_address,
+                    prediction_mode,
+                    coded_chroma_pattern,
+                    coded_luma_pattern,
+                    &mut prev_qp_delta,
+                    &mut qp_y,
+                    grid_width as usize,
+                    chroma_grid_w,
+                    &mut cbp_cache,
+                    &mut chroma_pred_modes,
+                    &mut luma_nonzero_counts,
+                    &mut cb_nonzero_counts,
+                    &mut cr_nonzero_counts,
+                )?;
+            }
+            MacroblockType::Intra4x4 => {
+                decode_and_reconstruct_intra4x4_cabac(
+                    &mut engine,
+                    &mut contexts,
+                    &mut frame,
+                    sps,
+                    pps,
+                    mb_x,
+                    mb_y,
+                    macroblock_address,
+                    &mut prev_qp_delta,
+                    &mut qp_y,
+                    grid_width as usize,
+                    chroma_grid_w,
+                    &mut cbp_cache,
+                    &mut chroma_pred_modes,
+                    &mut intra4x4_modes,
+                    &mb_types,
+                    &mut luma_nonzero_counts,
+                    &mut cb_nonzero_counts,
+                    &mut cr_nonzero_counts,
+                )?;
+            }
+            _ => return Err(H264DecodeError::UnsupportedFeature),
+        }
+
+        if mb_y == 0 {
+            let offset = (mb_x * 16) as usize;
+            eprintln!(
+                "Our MB {} Y[0..7]: {:?}",
+                macroblock_address,
+                &frame.y[offset..offset + 8]
+            );
+        }
+
+        if engine.decode_terminate()? == 1 {
+            break;
+        }
+    }
+
+    Ok(frame)
+}
+
+fn reconstruct_inter_slice_cabac(
+    rbsp: &[u8],
+    sps: &Sps,
+    pps: &Pps,
+    header: &crate::video::h264::slice::SliceHeader,
+    reference_lists: &ReferencePictureLists<'_>,
+) -> Result<Yuv420Frame, H264DecodeError> {
+    let macroblock_count = sps
+        .pic_width_in_mbs
+        .checked_mul(sps.pic_height_in_map_units)
+        .ok_or(H264DecodeError::InvalidStream)?;
+    let grid_width = (sps.pic_width_in_mbs * 4) as usize;
+    let grid_height = (sps.pic_height_in_map_units * 4) as usize;
+
+    let byte_offset = header.slice_data_bit_offset / 8;
+    if byte_offset >= rbsp.len() {
+        return Err(H264DecodeError::InvalidStream);
+    }
+    let mut engine = CabacEngine::new(&rbsp[byte_offset..])?;
+    let initial_qp = 26i32 + pps.pic_init_qp_minus26 + header.slice_qp_delta;
+    if !(0..=51).contains(&initial_qp) {
+        return Err(H264DecodeError::InvalidStream);
+    }
+
+    match header.prefix.slice_type {
+        SliceType::P => {
+            let mut contexts =
+                CabacContexts::new(SliceType::P, header.cabac_init_idc.unwrap_or(0), initial_qp);
+            let mut frame = Yuv420Frame::new(sps.width, sps.height)?;
+            let mut motion_grid = MotionGrid::new(grid_width, grid_height)?;
+            let mut skipped = vec![false; macroblock_count as usize];
+            let mut cbp_cache = vec![0u32; macroblock_count as usize];
+            let mut mvd_cache = vec![[0i32; 2]; macroblock_count as usize];
+            let mut prev_qp_delta = 0i32;
+            let mut qp_y = initial_qp;
+            
+            let mut intra4x4_modes = vec![Intra4x4Mode::Dc; (macroblock_count * 16) as usize];
+            let mut chroma_pred_modes = vec![0u8; macroblock_count as usize];
+            let mut mb_types: Vec<Option<MacroblockType>> = vec![None; macroblock_count as usize];
+            let mut luma_nonzero_counts = vec![0u8; grid_width * grid_height];
+            let mut cb_nonzero_counts =
+                vec![0u8; (sps.pic_width_in_mbs * 2 * sps.pic_height_in_map_units * 2) as usize];
+            let mut cr_nonzero_counts =
+                vec![0u8; (sps.pic_width_in_mbs * 2 * sps.pic_height_in_map_units * 2) as usize];
+            let chroma_grid_w = (sps.pic_width_in_mbs * 2) as usize;
+
+            for address in 0..macroblock_count {
+                let mb_x = address % sps.pic_width_in_mbs;
+                let mb_y = address / sps.pic_width_in_mbs;
+
+                eprintln!(
+                    "[P CABAC STATE] mb_addr={} bits={} range={} offset={}",
+                    address, engine.bits_consumed, engine.range, engine.offset
+                );
+
+                let left_avail = mb_x > 0;
+                let top_avail = mb_y > 0;
+                let left_skip = left_avail && skipped[address as usize - 1];
+                let top_skip =
+                    top_avail && skipped[address as usize - sps.pic_width_in_mbs as usize];
+
+                let is_skip = decode_mb_skip_flag(
+                    &mut engine,
+                    &mut contexts,
+                    SliceType::P,
+                    left_avail,
+                    left_skip,
+                    top_avail,
+                    top_skip,
+                )?;
+
+                if is_skip {
+                    skipped[address as usize] = true;
+                    prev_qp_delta = 0;
+                    let motion = motion_grid.predict(mb_x, mb_y, 0);
+                    let skip_motion = if motion_grid.p_skip_requires_zero(mb_x, mb_y) {
+                        MotionVector::default()
+                    } else {
+                        motion
+                    };
+                    let reference = reference_picture(&reference_lists.list0, 0)?;
+                    motion_compensate_macroblock(
+                        &mut frame,
+                        &reference.frame,
+                        mb_x,
+                        mb_y,
+                        skip_motion,
+                    )?;
+                    motion_grid.set_macroblock(mb_x, mb_y, 0, skip_motion);
+                } else {
+                    eprintln!(
+                        "[P-slice] mb_addr={}/{} (x={}, y={}) is_skip=false",
+                        address, macroblock_count, mb_x, mb_y
+                    );
+                    let mb_type_opt =
+                        match decode_p_slice_mb_type(&mut engine, &mut contexts, false, false) {
+                            Ok(t) => t,
+                            Err(e) => {
+                                eprintln!("[P-slice] decode_p_slice_mb_type error: {:?}", e);
+                                return Err(e);
+                            }
+                        };
+                    eprintln!(
+                        "[P-slice] mb_addr={} mb_type_opt={:?}",
+                        address, mb_type_opt
+                    );
+
+                    match mb_type_opt {
+                        None => {
+                            
+                            let ref_a = if mb_x > 0 {
+                                motion_grid
+                                    .cell((mb_x as usize - 1) * 4, mb_y as usize * 4)
+                                    .map(|(r, _)| r)
+                            } else {
+                                None
+                            };
+                            let ref_b = if mb_y > 0 {
+                                motion_grid
+                                    .cell(mb_x as usize * 4, (mb_y as usize - 1) * 4)
+                                    .map(|(r, _)| r)
+                            } else {
+                                None
+                            };
+                            let ref_idx = decode_cabac_ref_idx(
+                                &mut engine,
+                                &mut contexts,
+                                ref_a,
+                                ref_b,
+                                header.num_ref_idx_l0_active,
+                            )?;
+
+                            let mvd_a = if mb_x > 0 {
+                                mvd_cache[address as usize - 1]
+                            } else {
+                                [0, 0]
+                            };
+                            let mvd_b = if mb_y > 0 {
+                                mvd_cache[address as usize - sps.pic_width_in_mbs as usize]
+                            } else {
+                                [0, 0]
+                            };
+                            let amvd_x = mvd_a[0].abs() + mvd_b[0].abs();
+                            let amvd_y = mvd_a[1].abs() + mvd_b[1].abs();
+                            let mvd_x = decode_cabac_mvd(&mut engine, &mut contexts, amvd_x, 40)?;
+                            let mvd_y = decode_cabac_mvd(&mut engine, &mut contexts, amvd_y, 47)?;
+                            mvd_cache[address as usize] = [mvd_x, mvd_y];
+
+                            let left_cbp = if mb_x > 0 {
+                                cbp_cache[address as usize - 1]
+                            } else {
+                                0x00F
+                            };
+                            let top_cbp = if mb_y > 0 {
+                                cbp_cache[address as usize - sps.pic_width_in_mbs as usize]
+                            } else {
+                                0x00F
+                            };
+                            let cbp =
+                                decode_cabac_cbp(&mut engine, &mut contexts, left_cbp, top_cbp)?;
+                            eprintln!(
+                                "[P-slice mb 81] ref_idx={} mvd=({},{}) cbp={:#x}",
+                                ref_idx, mvd_x, mvd_y, cbp
+                            );
+                            cbp_cache[address as usize] = cbp;
+
+                            if cbp != 0 {
+                                let qp_delta = decode_cabac_mb_qp_delta(
+                                    &mut engine,
+                                    &mut contexts,
+                                    prev_qp_delta,
+                                )?;
+                                prev_qp_delta = qp_delta;
+                                qp_y = (qp_y + qp_delta).rem_euclid(52);
+                            } else {
+                                prev_qp_delta = 0;
+                            }
+
+                            let motion_prediction = motion_grid.predict(mb_x, mb_y, ref_idx);
+                            let motion = MotionVector {
+                                x: motion_prediction
+                                    .x
+                                    .checked_add(mvd_x)
+                                    .ok_or(H264DecodeError::InvalidStream)?,
+                                y: motion_prediction
+                                    .y
+                                    .checked_add(mvd_y)
+                                    .ok_or(H264DecodeError::InvalidStream)?,
+                            };
+                            let reference = reference_picture(&reference_lists.list0, ref_idx)?;
+                            motion_compensate_macroblock(
+                                &mut frame,
+                                &reference.frame,
+                                mb_x,
+                                mb_y,
+                                motion,
+                            )?;
+                            motion_grid.set_macroblock(mb_x, mb_y, ref_idx, motion);
+
+                            if cbp != 0 {
+                                decode_and_apply_inter_residual_cabac(
+                                    &mut engine,
+                                    &mut contexts,
+                                    &mut frame,
+                                    sps,
+                                    pps,
+                                    mb_x,
+                                    mb_y,
+                                    cbp,
+                                    qp_y,
+                                    grid_width,
+                                    chroma_grid_w,
+                                    &cbp_cache,
+                                    &mut luma_nonzero_counts,
+                                    &mut cb_nonzero_counts,
+                                    &mut cr_nonzero_counts,
+                                )?;
+                            }
+                        }
+                        Some(MacroblockType::Intra16x16 {
+                            prediction_mode,
+                            coded_chroma_pattern,
+                            coded_luma_pattern,
+                        }) => {
+                            mb_types[address as usize] = Some(MacroblockType::Intra16x16 {
+                                prediction_mode,
+                                coded_chroma_pattern,
+                                coded_luma_pattern,
+                            });
+                            decode_and_reconstruct_intra16x16_cabac(
+                                &mut engine,
+                                &mut contexts,
+                                &mut frame,
+                                sps,
+                                pps,
+                                mb_x,
+                                mb_y,
+                                address,
+                                prediction_mode,
+                                coded_chroma_pattern,
+                                coded_luma_pattern,
+                                &mut prev_qp_delta,
+                                &mut qp_y,
+                                grid_width,
+                                chroma_grid_w,
+                                &mut cbp_cache,
+                                &mut chroma_pred_modes,
+                                &mut luma_nonzero_counts,
+                                &mut cb_nonzero_counts,
+                                &mut cr_nonzero_counts,
+                            )?;
+                        }
+                        Some(MacroblockType::Intra4x4) => {
+                            mb_types[address as usize] = Some(MacroblockType::Intra4x4);
+                            decode_and_reconstruct_intra4x4_cabac(
+                                &mut engine,
+                                &mut contexts,
+                                &mut frame,
+                                sps,
+                                pps,
+                                mb_x,
+                                mb_y,
+                                address,
+                                &mut prev_qp_delta,
+                                &mut qp_y,
+                                grid_width,
+                                chroma_grid_w,
+                                &mut cbp_cache,
+                                &mut chroma_pred_modes,
+                                &mut intra4x4_modes,
+                                &mb_types,
+                                &mut luma_nonzero_counts,
+                                &mut cb_nonzero_counts,
+                                &mut cr_nonzero_counts,
+                            )?;
+                        }
+                        _ => return Err(H264DecodeError::UnsupportedFeature),
+                    }
+                }
+
+                if engine.decode_terminate()? == 1 {
+                    break;
+                }
+            }
+
+            Ok(frame)
+        }
+        SliceType::B => {
+            let mut contexts =
+                CabacContexts::new(SliceType::B, header.cabac_init_idc.unwrap_or(0), initial_qp);
+            for address in 0..macroblock_count {
+                let mb_x = address % sps.pic_width_in_mbs;
+                let mb_y = address / sps.pic_width_in_mbs;
+
+                let is_skip = decode_mb_skip_flag(
+                    &mut engine,
+                    &mut contexts,
+                    SliceType::B,
+                    mb_x > 0,
+                    false,
+                    mb_y > 0,
+                    false,
+                )?;
+                if !is_skip {
+                    return Err(H264DecodeError::UnsupportedFeature);
+                }
+                if engine.decode_terminate()? == 1 {
+                    break;
+                }
+            }
+            let first = reference_picture(&reference_lists.list0, 0)?;
+            let second = reference_picture(&reference_lists.list1, 0)?;
+            average_frames(&first.frame, &second.frame)
+        }
+        _ => Err(H264DecodeError::UnsupportedFeature),
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct MotionVector {
     x: i32,
@@ -828,6 +2108,156 @@ fn motion_compensate_macroblock(
     copy_luma_macroblock(output, reference, mb_x, mb_y, motion)?;
     copy_chroma_macroblock(output, reference, ColorPlane::U, mb_x, mb_y, motion)?;
     copy_chroma_macroblock(output, reference, ColorPlane::V, mb_x, mb_y, motion)?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decode_and_apply_inter_residual_cabac(
+    engine: &mut CabacEngine<'_>,
+    contexts: &mut CabacContexts,
+    frame: &mut Yuv420Frame,
+    sps: &Sps,
+    pps: &Pps,
+    mb_x: u32,
+    mb_y: u32,
+    cbp: u32,
+    qp_y: i32,
+    grid_width: usize,
+    chroma_grid_w: usize,
+    cbp_cache: &[u32],
+    luma_nonzero_counts: &mut [u8],
+    cb_nonzero_counts: &mut [u8],
+    cr_nonzero_counts: &mut [u8],
+) -> Result<(), H264DecodeError> {
+    let qp_y_u8 = u8::try_from(qp_y).map_err(|_| H264DecodeError::InvalidStream)?;
+    let qp_c = chroma_qp_from_luma(qp_y, pps.chroma_qp_index_offset);
+
+    // 1. Luma 4x4 residual blocks
+    for b_idx in 0..16usize {
+        let b_8x8 = b_idx / 4;
+        let b_4x4 = b_idx % 4;
+        let bx = (b_8x8 % 2) * 2 + (b_4x4 % 2);
+        let by = (b_8x8 / 2) * 2 + (b_4x4 / 2);
+        let gx = mb_x as usize * 4 + bx;
+        let gy = mb_y as usize * 4 + by;
+        let cond_a = if gx > 0 {
+            luma_nonzero_counts[gy * grid_width + gx - 1] > 0
+        } else {
+            false
+        };
+        let cond_b = if gy > 0 {
+            luma_nonzero_counts[(gy - 1) * grid_width + gx] > 0
+        } else {
+            false
+        };
+
+        let (residual_levels, nnz) = if (cbp & (1 << (b_idx / 4))) != 0 {
+            decode_cabac_residual_block(
+                engine,
+                contexts,
+                ResidualCategory::Luma4x4,
+                cond_a,
+                cond_b,
+            )?
+        } else {
+            ([0i32; 16], 0)
+        };
+        luma_nonzero_counts[gy * grid_width + gx] = nnz as u8;
+
+        if nnz > 0 {
+            eprintln!(
+                "[inter residual] mb({},{}) b_idx={} cond_a={} cond_b={} nnz={}: {:?}",
+                mb_x,
+                mb_y,
+                b_idx,
+                cond_a,
+                cond_b,
+                nnz,
+                &residual_levels[..8]
+            );
+            let residual = reconstruct_residual_4x4(&residual_levels, qp_y_u8, None)?;
+            let blk_x = mb_x * 16 + bx as u32 * 4;
+            let blk_y = mb_y * 16 + by as u32 * 4;
+            for row in 0..4u32 {
+                let row_offset = ((blk_y + row) * frame.width + blk_x) as usize;
+                for col in 0..4u32 {
+                    let idx = (row * 4 + col) as usize;
+                    let sample = i32::from(frame.y[row_offset + col as usize]) + residual[idx];
+                    frame.y[row_offset + col as usize] = sample.clamp(0, 255) as u8;
+                }
+            }
+        }
+    }
+
+    // 2. Chroma residual
+    let coded_chroma_pattern = (cbp >> 4) & 0x3;
+    let (chroma_dc_cb, chroma_dc_cr) = decode_chroma_dc_cabac(
+        engine,
+        contexts,
+        coded_chroma_pattern,
+        mb_x,
+        mb_y,
+        sps.pic_width_in_mbs,
+        cbp_cache,
+    )?;
+    let (chroma_ac_cb, chroma_ac_cr) = if coded_chroma_pattern >= 2 {
+        decode_chroma_ac_cabac(
+            engine,
+            contexts,
+            mb_x,
+            mb_y,
+            chroma_grid_w,
+            cb_nonzero_counts,
+            cr_nonzero_counts,
+        )?
+    } else {
+        ([[0i32; 16]; 4], [[0i32; 16]; 4])
+    };
+
+    if coded_chroma_pattern > 0 {
+        let dc_trans_cb = inverse_hadamard_2x2(&chroma_dc_cb);
+        let dc_scaled_cb: [i32; 4] = std::array::from_fn(|i| scale_chroma_dc(dc_trans_cb[i], qp_c));
+        let (cw, _) = frame.plane_dimensions(ColorPlane::U);
+        for b_idx in 0..4usize {
+            let bx = (b_idx % 2) as u32;
+            let by = (b_idx / 2) as u32;
+            let blk_x = mb_x * 8 + bx * 4;
+            let blk_y = mb_y * 8 + by * 4;
+            let mut scaled_ac = inverse_scale_4x4(&chroma_ac_cb[b_idx], qp_c, None)?;
+            scaled_ac[0] = dc_scaled_cb[b_idx];
+            let residual = inverse_transform_4x4(&scaled_ac)?;
+            for row in 0..4u32 {
+                let row_offset = ((blk_y + row) * cw + blk_x) as usize;
+                for col in 0..4u32 {
+                    let idx = (row * 4 + col) as usize;
+                    let sample = i32::from(frame.u[row_offset + col as usize]) + residual[idx];
+                    frame.u[row_offset + col as usize] = sample.clamp(0, 255) as u8;
+                }
+            }
+        }
+
+        let dc_trans_cr = inverse_hadamard_2x2(&chroma_dc_cr);
+        let dc_scaled_cr: [i32; 4] = std::array::from_fn(|i| scale_chroma_dc(dc_trans_cr[i], qp_c));
+        let (cw, _) = frame.plane_dimensions(ColorPlane::V);
+        for b_idx in 0..4usize {
+            let bx = (b_idx % 2) as u32;
+            let by = (b_idx / 2) as u32;
+            let blk_x = mb_x * 8 + bx * 4;
+            let blk_y = mb_y * 8 + by * 4;
+            let mut scaled_ac = inverse_scale_4x4(&chroma_ac_cr[b_idx], qp_c, None)?;
+            scaled_ac[0] = dc_scaled_cr[b_idx];
+            let residual = inverse_transform_4x4(&scaled_ac)?;
+            for row in 0..4u32 {
+                let row_offset = ((blk_y + row) * cw + blk_x) as usize;
+                for col in 0..4u32 {
+                    let idx = (row * 4 + col) as usize;
+                    let sample = i32::from(frame.v[row_offset + col as usize]) + residual[idx];
+                    frame.v[row_offset + col as usize] = sample.clamp(0, 255) as u8;
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -966,6 +2396,330 @@ fn luma_neighbor_context(counts: &[u8], grid_width: usize, x: usize, y: usize) -
     }
 }
 
+
+
+
+#[allow(clippy::too_many_arguments)]
+fn decode_chroma_dc_cabac(
+    engine: &mut CabacEngine<'_>,
+    contexts: &mut CabacContexts,
+    coded_chroma_pattern: u32,
+    mb_x: u32,
+    mb_y: u32,
+    pic_width_in_mbs: u32,
+    cbp_cache: &[u32],
+) -> Result<([i32; 4], [i32; 4]), H264DecodeError> {
+    if coded_chroma_pattern == 0 {
+        return Ok(([0i32; 4], [0i32; 4]));
+    }
+
+    // CBF context for ChromaDC uses the chroma cbp of neighbours
+    let cond_a = if mb_x > 0 {
+        ((cbp_cache[mb_y as usize * pic_width_in_mbs as usize + mb_x as usize - 1] >> 4) & 0x3) > 0
+    } else {
+        false
+    };
+    let cond_b = if mb_y > 0 {
+        ((cbp_cache[(mb_y as usize - 1) * pic_width_in_mbs as usize + mb_x as usize] >> 4) & 0x3)
+            > 0
+    } else {
+        false
+    };
+
+    // Decode ChromaDC for Cb
+    let (block_cb, nnz_cb) =
+        decode_cabac_residual_block(engine, contexts, ResidualCategory::ChromaDc, cond_a, cond_b)?;
+    let dc_cb = [block_cb[0], block_cb[1], block_cb[2], block_cb[3]];
+
+    // Decode ChromaDC for Cr
+    let (block_cr, nnz_cr) =
+        decode_cabac_residual_block(engine, contexts, ResidualCategory::ChromaDc, cond_a, cond_b)?;
+    let dc_cr = [block_cr[0], block_cr[1], block_cr[2], block_cr[3]];
+    eprintln!(
+        "[ChromaDC mb({},{})] Cb nnz={}: {:?}, Cr nnz={}: {:?}",
+        mb_x, mb_y, nnz_cb, dc_cb, nnz_cr, dc_cr
+    );
+
+    Ok((dc_cb, dc_cr))
+}
+
+/// Decode CABAC ChromaAC residuals for Cb and Cr (4 blocks × 15 AC coefficients each).
+/// Only called when coded_chroma_pattern == 2.
+fn decode_chroma_ac_cabac(
+    engine: &mut CabacEngine<'_>,
+    contexts: &mut CabacContexts,
+    mb_x: u32,
+    mb_y: u32,
+    chroma_grid_w: usize,
+    cb_nonzero_counts: &mut [u8],
+    cr_nonzero_counts: &mut [u8],
+) -> Result<([[i32; 16]; 4], [[i32; 16]; 4]), H264DecodeError> {
+    let mut ac_cb = [[0i32; 16]; 4];
+    let mut ac_cr = [[0i32; 16]; 4];
+
+    
+    
+    for b_idx in 0..4usize {
+        let bx = b_idx % 2;
+        let by = b_idx / 2;
+        let gx = mb_x as usize * 2 + bx;
+        let gy = mb_y as usize * 2 + by;
+        let cond_a = if gx > 0 {
+            cb_nonzero_counts[gy * chroma_grid_w + gx - 1] > 0
+        } else {
+            false
+        };
+        let cond_b = if gy > 0 {
+            cb_nonzero_counts[(gy - 1) * chroma_grid_w + gx] > 0
+        } else {
+            false
+        };
+        let (block, nnz) = decode_cabac_residual_block(
+            engine,
+            contexts,
+            ResidualCategory::ChromaAc,
+            cond_a,
+            cond_b,
+        )?;
+        cb_nonzero_counts[gy * chroma_grid_w + gx] = nnz as u8;
+        if nnz > 0 {
+            eprintln!(
+                "[ChromaAC Cb mb({},{}) b={}] nnz={}: {:?}",
+                mb_x,
+                mb_y,
+                b_idx,
+                nnz,
+                &block[..8]
+            );
+        }
+        ac_cb[b_idx] = block;
+    }
+    for b_idx in 0..4usize {
+        let bx = b_idx % 2;
+        let by = b_idx / 2;
+        let gx = mb_x as usize * 2 + bx;
+        let gy = mb_y as usize * 2 + by;
+        let cond_a = if gx > 0 {
+            cr_nonzero_counts[gy * chroma_grid_w + gx - 1] > 0
+        } else {
+            false
+        };
+        let cond_b = if gy > 0 {
+            cr_nonzero_counts[(gy - 1) * chroma_grid_w + gx] > 0
+        } else {
+            false
+        };
+        let (block, nnz) = decode_cabac_residual_block(
+            engine,
+            contexts,
+            ResidualCategory::ChromaAc,
+            cond_a,
+            cond_b,
+        )?;
+        cr_nonzero_counts[gy * chroma_grid_w + gx] = nnz as u8;
+        if nnz > 0 {
+            eprintln!(
+                "[ChromaAC Cr mb({},{}) b={}] nnz={}: {:?}",
+                mb_x,
+                mb_y,
+                b_idx,
+                nnz,
+                &block[..8]
+            );
+        }
+        ac_cr[b_idx] = block;
+    }
+    eprintln!(
+        "[ChromaAC mb({},{})] decoded 4 Cb and 4 Cr blocks",
+        mb_x, mb_y
+    );
+    Ok((ac_cb, ac_cr))
+}
+
+
+fn scale_chroma_dc(dc_level: i32, qp_c: u8) -> i32 {
+    
+    
+    let qp = qp_c as i32;
+    let shift = qp / 6;
+    
+    let v = [10i32, 11, 13, 14, 16, 18][(qp % 6) as usize];
+    let scaled = dc_level * v;
+    if shift > 0 {
+        (scaled + (1 << (shift - 1))) >> shift
+    } else {
+        scaled
+    }
+}
+
+
+
+#[allow(clippy::too_many_arguments)]
+fn reconstruct_chroma_plane(
+    frame: &mut Yuv420Frame,
+    plane: ColorPlane,
+    mb_x: u32,
+    mb_y: u32,
+    chroma_mode: u8,
+    dc_coeffs: &[i32; 4],
+    ac_blocks: &[[i32; 16]; 4],
+    qp_c: u8,
+    chroma_grid_w: usize,
+    nonzero_counts: &mut [u8],
+) -> Result<(), H264DecodeError> {
+    let (frame_width, _) = frame.plane_dimensions(plane);
+    let cx = mb_x * 8;
+    let cy = mb_y * 8;
+
+    
+    let top_row: Option<[u8; 8]> = (mb_y > 0).then(|| {
+        std::array::from_fn(|i| {
+            let offset = ((cy - 1) * frame_width + cx + i as u32) as usize;
+            match plane {
+                ColorPlane::U => frame.u[offset],
+                ColorPlane::V => frame.v[offset],
+                ColorPlane::Y => unreachable!(),
+            }
+        })
+    });
+    let left_col: Option<[u8; 8]> = (mb_x > 0).then(|| {
+        std::array::from_fn(|i| {
+            let offset = ((cy + i as u32) * frame_width + cx - 1) as usize;
+            match plane {
+                ColorPlane::U => frame.u[offset],
+                ColorPlane::V => frame.v[offset],
+                ColorPlane::Y => unreachable!(),
+            }
+        })
+    });
+
+    
+    let pred_dc = |tr: Option<&[u8]>, lc: Option<&[u8]>| -> u8 {
+        let sum: u32 = tr
+            .iter()
+            .flat_map(|s| s.iter())
+            .chain(lc.iter().flat_map(|s| s.iter()))
+            .map(|&b| b as u32)
+            .sum();
+        let count = tr.map_or(0, |s| s.len()) + lc.map_or(0, |s| s.len());
+        if count == 0 {
+            128
+        } else {
+            ((sum + count as u32 / 2) / count as u32) as u8
+        }
+    };
+
+    
+    let pred: [u8; 4] = match (top_row, left_col) {
+        (Some(ref t), Some(ref l)) => [
+            pred_dc(Some(&t[..4]), Some(&l[..4])),
+            pred_dc(Some(&t[4..]), None),
+            pred_dc(None, Some(&l[4..])),
+            pred_dc(Some(&t[4..]), Some(&l[4..])),
+        ],
+        (Some(ref t), None) => [
+            pred_dc(Some(&t[..4]), None),
+            pred_dc(Some(&t[4..]), None),
+            pred_dc(Some(&t[..4]), None),
+            pred_dc(Some(&t[4..]), None),
+        ],
+        (None, Some(ref l)) => [
+            pred_dc(None, Some(&l[..4])),
+            pred_dc(None, Some(&l[..4])),
+            pred_dc(None, Some(&l[4..])),
+            pred_dc(None, Some(&l[4..])),
+        ],
+        (None, None) => [128u8; 4],
+    };
+
+    
+    let dc_transformed = inverse_hadamard_2x2(dc_coeffs);
+    let dc_scaled: [i32; 4] = std::array::from_fn(|i| scale_chroma_dc(dc_transformed[i], qp_c));
+
+    
+    
+    for b_idx in 0..4usize {
+        let bx = (b_idx % 2) as u32;
+        let by = (b_idx / 2) as u32;
+        let blk_x = cx + bx * 4;
+        let blk_y = cy + by * 4;
+
+        let gx = mb_x as usize * 2 + bx as usize;
+        let gy = mb_y as usize * 2 + by as usize;
+
+        
+        let mut scaled_ac = inverse_scale_4x4(&ac_blocks[b_idx], qp_c, None)?;
+        scaled_ac[0] = dc_scaled[b_idx]; 
+        let residual = inverse_transform_4x4(&scaled_ac)?;
+
+        let dc_pred = pred[b_idx];
+        let nnz = ac_blocks[b_idx].iter().filter(|&&v| v != 0).count()
+            + if dc_coeffs[b_idx] != 0 { 1 } else { 0 };
+        nonzero_counts[gy * chroma_grid_w + gx] = nnz as u8;
+
+        let target = match plane {
+            ColorPlane::U => &mut frame.u,
+            ColorPlane::V => &mut frame.v,
+            ColorPlane::Y => unreachable!(),
+        };
+        for row in 0..4u32 {
+            for col in 0..4u32 {
+                let pixel_idx = ((blk_y + row) * frame_width + blk_x + col) as usize;
+                let r = residual[(row * 4 + col) as usize];
+                let pred_val = if chroma_mode == 0 {
+                    dc_pred as i32
+                } else {
+                    dc_pred as i32
+                }; 
+                target[pixel_idx] = (pred_val + r).clamp(0, 255) as u8;
+            }
+        }
+    }
+    Ok(())
+}
+
+
+#[allow(clippy::too_many_arguments)]
+fn reconstruct_chroma_blocks(
+    frame: &mut Yuv420Frame,
+    mb_x: u32,
+    mb_y: u32,
+    chroma_mode: u8,
+    dc_cb: &[i32; 4],
+    dc_cr: &[i32; 4],
+    ac_cb: &[[i32; 16]; 4],
+    ac_cr: &[[i32; 16]; 4],
+    qp_c: u8,
+    chroma_grid_w: usize,
+    cb_nonzero_counts: &mut [u8],
+    cr_nonzero_counts: &mut [u8],
+) -> Result<(), H264DecodeError> {
+    reconstruct_chroma_plane(
+        frame,
+        ColorPlane::U,
+        mb_x,
+        mb_y,
+        chroma_mode,
+        dc_cb,
+        ac_cb,
+        qp_c,
+        chroma_grid_w,
+        cb_nonzero_counts,
+    )?;
+    reconstruct_chroma_plane(
+        frame,
+        ColorPlane::V,
+        mb_x,
+        mb_y,
+        chroma_mode,
+        dc_cr,
+        ac_cr,
+        qp_c,
+        chroma_grid_w,
+        cr_nonzero_counts,
+    )
+}
+
 fn reconstruct_chroma_dc(
     frame: &mut Yuv420Frame,
     plane: ColorPlane,
@@ -1050,6 +2804,29 @@ fn reconstruct_chroma_dc(
     }
 
     Ok(())
+}
+
+
+fn inverse_hadamard_2x2(input: &[i32; 4]) -> [i32; 4] {
+    let a = input[0] + input[1] + input[2] + input[3];
+    let b = input[0] - input[1] + input[2] - input[3];
+    let c = input[0] + input[1] - input[2] - input[3];
+    let d = input[0] - input[1] - input[2] + input[3];
+    
+    [a, b, c, d]
+}
+
+
+
+fn chroma_qp_from_luma(qp_y: i32, chroma_qp_index_offset: i32) -> u8 {
+    
+    const CHROMA_QP_TABLE: [u8; 52] = [
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+        25, 26, 27, 28, 29, 29, 30, 31, 32, 32, 33, 34, 34, 35, 35, 36, 36, 37, 37, 37, 38, 38, 38,
+        39, 39, 39, 39,
+    ];
+    let qp_c_prime = (qp_y + chroma_qp_index_offset).clamp(0, 51) as usize;
+    CHROMA_QP_TABLE[qp_c_prime]
 }
 
 fn inverse_hadamard_4x4(input: &[i32; 16]) -> Result<[i32; 16], H264DecodeError> {

@@ -1,5 +1,6 @@
 pub mod avc;
 pub mod bslice;
+pub mod cabac;
 pub mod cavlc;
 pub mod deblocking;
 pub mod decoder;
@@ -18,5 +19,5 @@ pub mod transform;
 pub mod weighted;
 
 pub use avc::{avc1_to_annex_b, parse_avcc};
-pub use decoder::{decode_annex_b, decode_annex_b_frames};
+pub use decoder::{H264Decoder, decode_annex_b, decode_annex_b_frames};
 pub use frame::Yuv420Frame;

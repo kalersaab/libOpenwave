@@ -1,3 +1,6 @@
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::type_complexity)]
+#![allow(clippy::if_same_then_else)]
 pub mod audio;
 pub mod core;
 pub mod demux;

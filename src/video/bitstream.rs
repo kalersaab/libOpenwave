@@ -38,6 +38,10 @@ impl<'a> BitReader<'a> {
         self.bit_pos
     }
 
+    pub fn is_byte_aligned(&self) -> bool {
+        self.bit_pos.is_multiple_of(8)
+    }
+
     pub fn skip_bits(&mut self, count: usize) -> Result<(), BitstreamError> {
         if count > self.bits_remaining() {
             return Err(BitstreamError::UnexpectedEof);

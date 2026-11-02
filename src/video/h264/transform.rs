@@ -24,6 +24,54 @@ const LEVEL_SCALE: [[i64; 3]; 6] = [
 
 const SCALE_CLASS_4X4: [usize; 16] = [0, 1, 0, 1, 1, 2, 1, 2, 0, 1, 0, 1, 1, 2, 1, 2];
 
+/// Inverse quantisation for the 4×4 Luma DC block used in Intra_16×16.
+///
+/// Per H.264 spec §8.5.6, every one of the 16 DC-level coefficients is
+/// rescaled using the **position-(0,0)** scale factor (class 0), regardless
+/// of its position in the 4×4 DC block.  Using the ordinary `inverse_scale_4x4`
+/// here is wrong because that function applies position-varying classes.
+pub fn inverse_scale_luma_dc(
+    levels: &[i32; 16],
+    qp: u8,
+    scaling_list: Option<&[u8; 16]>,
+) -> Result<[i32; 16], TransformError> {
+    if qp > 51 {
+        return Err(TransformError::InvalidQp);
+    }
+    let scaling_list = scaling_list.copied().unwrap_or([16; 16]);
+    if scaling_list.contains(&0) {
+        return Err(TransformError::InvalidScalingFactor);
+    }
+
+    let qp_div6 = u32::from(qp / 6);
+    let qp_mod6 = usize::from(qp % 6);
+    // All DC positions use class 0 (i.e. the m(0,0) entry of the level-scale table).
+    let class0_scale = LEVEL_SCALE[qp_mod6][0];
+    let mut scaled = [0i32; 16];
+
+    for index in 0..16 {
+        let level_scale = class0_scale * i64::from(scaling_list[index]);
+        let product = i64::from(levels[index])
+            .checked_mul(level_scale)
+            .ok_or(TransformError::Overflow)?;
+        let value = if qp_div6 >= 4 {
+            product
+                .checked_shl(qp_div6 - 4)
+                .ok_or(TransformError::Overflow)?
+        } else {
+            let shift = 4 - qp_div6;
+            let rounding = 1i64 << (shift - 1);
+            product
+                .checked_add(rounding)
+                .ok_or(TransformError::Overflow)?
+                >> shift
+        };
+        scaled[index] = i32::try_from(value).map_err(|_| TransformError::Overflow)?;
+    }
+
+    Ok(scaled)
+}
+
 pub fn inverse_scale_4x4(
     levels: &[i32; 16],
     qp: u8,
