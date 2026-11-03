@@ -1305,7 +1305,7 @@ fn decode_and_reconstruct_intra4x4_cabac(
         let predicted_mode = if let (Some(mode_a), Some(mode_b)) = (pred_a, pred_b) {
             (mode_a as u8).min(mode_b as u8)
         } else {
-            2 // DC
+            2
         };
 
         let mode_val = decode_intra4x4_pred_mode(engine, contexts, predicted_mode)?;
@@ -1536,7 +1536,7 @@ fn reconstruct_slice_cabac(
                 .and_then(|height| width.checked_mul(height))
         })
         .ok_or(H264DecodeError::InvalidStream)?;
-    // Chroma grid is half of luma in each dimension for 4:2:0
+
     let chroma_grid_w = (sps.pic_width_in_mbs * 2) as usize;
     let chroma_grid_h = (sps.pic_height_in_map_units * 2) as usize;
     let chroma_grid_len = chroma_grid_w
@@ -1581,7 +1581,7 @@ fn reconstruct_slice_cabac(
         let mb_x = macroblock_address % sps.pic_width_in_mbs;
         let mb_y = macroblock_address / sps.pic_width_in_mbs;
 
-        // Log CABAC state at the start of each MB to track divergence
+
         eprintln!(
             "[CABAC STATE] mb_addr={} bits={} range={} offset={}",
             macroblock_address, engine.bits_consumed, engine.range, engine.offset
@@ -2123,7 +2123,7 @@ fn decode_and_apply_inter_residual_cabac(
     let qp_y_u8 = u8::try_from(qp_y).map_err(|_| H264DecodeError::InvalidStream)?;
     let qp_c = chroma_qp_from_luma(qp_y, pps.chroma_qp_index_offset);
 
-    // 1. Luma 4x4 residual blocks
+
     for b_idx in 0..16usize {
         let b_8x8 = b_idx / 4;
         let b_4x4 = b_idx % 4;
@@ -2180,7 +2180,7 @@ fn decode_and_apply_inter_residual_cabac(
         }
     }
 
-    // 2. Chroma residual
+
     let coded_chroma_pattern = (cbp >> 4) & 0x3;
     let (chroma_dc_cb, chroma_dc_cr) = decode_chroma_dc_cabac(
         engine,
@@ -2401,7 +2401,7 @@ fn decode_chroma_dc_cabac(
         return Ok(([0i32; 4], [0i32; 4]));
     }
 
-    // CBF context for ChromaDC uses the chroma cbp of neighbours
+
     let cond_a = if mb_x > 0 {
         ((cbp_cache[mb_y as usize * pic_width_in_mbs as usize + mb_x as usize - 1] >> 4) & 0x3) > 0
     } else {
@@ -2414,12 +2414,12 @@ fn decode_chroma_dc_cabac(
         false
     };
 
-    // Decode ChromaDC for Cb
+
     let (block_cb, nnz_cb) =
         decode_cabac_residual_block(engine, contexts, ResidualCategory::ChromaDc, cond_a, cond_b)?;
     let dc_cb = [block_cb[0], block_cb[1], block_cb[2], block_cb[3]];
 
-    // Decode ChromaDC for Cr
+
     let (block_cr, nnz_cr) =
         decode_cabac_residual_block(engine, contexts, ResidualCategory::ChromaDc, cond_a, cond_b)?;
     let dc_cr = [block_cr[0], block_cr[1], block_cr[2], block_cr[3]];
@@ -2431,8 +2431,8 @@ fn decode_chroma_dc_cabac(
     Ok((dc_cb, dc_cr))
 }
 
-/// Decode CABAC ChromaAC residuals for Cb and Cr (4 blocks × 15 AC coefficients each).
-/// Only called when coded_chroma_pattern == 2.
+
+
 fn decode_chroma_ac_cabac(
     engine: &mut CabacEngine<'_>,
     contexts: &mut CabacContexts,

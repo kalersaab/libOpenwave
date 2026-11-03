@@ -3,35 +3,61 @@ use std::io;
 pub struct Mp3BitReader<'a> {
     data: &'a [u8],
     byte_pos: usize,
-    bit_pos: u8,
+    cache: u32,
+    cache_bits: i32,
+    bits_read: usize,
 }
 
 impl<'a> Mp3BitReader<'a> {
     pub fn new(data: &'a [u8]) -> Self {
-        Mp3BitReader {
+        let mut reader = Mp3BitReader {
             data,
             byte_pos: 0,
-            bit_pos: 0,
+            cache: 0,
+            cache_bits: 0,
+            bits_read: 0,
+        };
+        reader.fill_cache();
+        reader
+    }
+
+    pub fn new_at_bit_offset(data: &'a [u8], bit_offset: usize) -> Self {
+        let byte_pos = bit_offset / 8;
+        let _bit_pos = (bit_offset % 8) as u8;
+        let mut reader = Mp3BitReader {
+            data,
+            byte_pos,
+            cache: 0,
+            cache_bits: 0,
+            bits_read: bit_offset,
+        };
+        reader.fill_cache();
+        reader
+    }
+
+    fn fill_cache(&mut self) {
+        while self.cache_bits <= 24 && self.byte_pos < self.data.len() {
+            let byte = self.data[self.byte_pos];
+            self.byte_pos += 1;
+            self.cache = (self.cache << 8) | (byte as u32);
+            self.cache_bits += 8;
         }
     }
 
     pub fn read_bit(&mut self) -> io::Result<bool> {
-        if self.byte_pos >= self.data.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "MP3 bitstream EOF",
-            ));
+        if self.cache_bits <= 0 {
+            self.fill_cache();
+            if self.cache_bits <= 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "MP3 bitstream EOF",
+                ));
+            }
         }
 
-        let byte = self.data[self.byte_pos];
-        let bit = (byte >> (7 - self.bit_pos)) & 1;
-
-        self.bit_pos += 1;
-        if self.bit_pos == 8 {
-            self.bit_pos = 0;
-            self.byte_pos += 1;
-        }
-
+        self.cache_bits -= 1;
+        self.bits_read += 1;
+        let bit = (self.cache >> self.cache_bits) & 1;
         Ok(bit != 0)
     }
 
@@ -43,11 +69,31 @@ impl<'a> Mp3BitReader<'a> {
             ));
         }
 
-        let mut value = 0u32;
-        for _ in 0..n {
-            value = (value << 1) | (self.read_bit()? as u32);
+        if n == 0 {
+            return Ok(0);
         }
+
+        while self.cache_bits < n as i32 {
+            self.fill_cache();
+            if self.cache_bits < n as i32 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "Not enough bits available",
+                ));
+            }
+        }
+
+        self.cache_bits -= n as i32;
+        self.bits_read += n as usize;
+        let value = (self.cache >> self.cache_bits) & ((1 << n) - 1);
         Ok(value)
+    }
+
+    pub fn peek_bits(&self, n: u8) -> u32 {
+        if self.cache_bits < n as i32 {
+            return 0;
+        }
+        (self.cache >> (self.cache_bits - n as i32)) & ((1 << n) - 1)
     }
 
     pub fn skip_bits(&mut self, n: usize) -> io::Result<()> {
@@ -58,18 +104,19 @@ impl<'a> Mp3BitReader<'a> {
     }
 
     pub fn byte_align(&mut self) {
-        if self.bit_pos != 0 {
-            self.bit_pos = 0;
-            self.byte_pos += 1;
+        let bits_to_skip = (self.cache_bits % 8) as usize;
+        if bits_to_skip > 0 {
+            let _ = self.skip_bits(bits_to_skip);
         }
     }
 
     pub fn bits_available(&self) -> usize {
-        (self.data.len() - self.byte_pos) * 8 - self.bit_pos as usize
+        let remaining_bytes = self.data.len().saturating_sub(self.byte_pos);
+        (remaining_bytes * 8) + self.cache_bits.max(0) as usize
     }
 
-    pub fn position(&self) -> usize {
-        self.byte_pos * 8 + self.bit_pos as usize
+    pub fn position_bits(&self) -> usize {
+        self.bits_read
     }
 }
 
@@ -226,6 +273,91 @@ impl SideInfo {
     }
 }
 
+
+
+pub const SFB_LONG_44100: [u16; 23] = [
+    0, 4, 8, 12, 16, 20, 24, 30, 36, 44, 52, 62, 74, 90, 110, 134, 162, 196, 238, 288, 342, 418,
+    576,
+];
+
+pub const SFB_SHORT_44100: [u16; 14] = [0, 4, 8, 12, 16, 22, 30, 40, 52, 66, 84, 106, 136, 192];
+
+pub fn get_sfb_long(sample_rate: u32) -> &'static [u16] {
+    match sample_rate {
+        44100 => &SFB_LONG_44100,
+        _ => &SFB_LONG_44100,
+    }
+}
+
+pub fn get_sfb_short(sample_rate: u32) -> &'static [u16] {
+    match sample_rate {
+        44100 => &SFB_SHORT_44100,
+        _ => &SFB_SHORT_44100,
+    }
+}
+
+pub fn get_slen(scalefac_compress: u8) -> (u8, u8) {
+    let _slen1 = scalefac_compress >> 4;
+    let _slen2 = scalefac_compress & 0xF;
+
+    match scalefac_compress {
+        0..=15 => ((scalefac_compress / 5), (scalefac_compress % 5)),
+        _ => (0, 0),
+    }
+}
+
+pub struct BitReservoir {
+    buffer: Vec<u8>,
+    max_size: usize,
+}
+
+impl BitReservoir {
+    pub fn new() -> Self {
+        BitReservoir {
+            buffer: Vec::with_capacity(4096),
+            max_size: 4096,
+        }
+    }
+
+    pub fn append(&mut self, data: &[u8]) {
+        self.buffer.extend_from_slice(data);
+
+        if self.buffer.len() > self.max_size {
+            let excess = self.buffer.len() - self.max_size;
+            self.buffer.drain(0..excess);
+        }
+    }
+
+    pub fn get_main_data(&self, main_data_begin: usize, length: usize) -> Option<&[u8]> {
+        if main_data_begin > self.buffer.len() {
+            return None;
+        }
+
+        let start = self.buffer.len() - main_data_begin;
+        let end = (start + length).min(self.buffer.len());
+
+        if start >= end {
+            return None;
+        }
+
+        Some(&self.buffer[start..end])
+    }
+
+    pub fn len(&self) -> usize {
+        self.buffer.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.buffer.is_empty()
+    }
+}
+
+impl Default for BitReservoir {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,14 +384,13 @@ mod tests {
 
     #[test]
     fn byte_aligns_correctly() {
-        let data = [0xFF, 0xAA];
+        let data = [0xFF, 0xAA, 0xBB, 0xCC];
         let mut br = Mp3BitReader::new(&data);
 
         br.read_bits(3).unwrap();
         br.byte_align();
 
-        assert_eq!(br.byte_pos, 1);
-        assert_eq!(br.bit_pos, 0);
+        assert_eq!(br.position_bits(), 8);
     }
 
     #[test]
@@ -267,8 +398,8 @@ mod tests {
         let data = [0xFF, 0xAA];
         let mut br = Mp3BitReader::new(&data);
 
-        assert_eq!(br.position(), 0);
+        assert_eq!(br.position_bits(), 0);
         br.read_bits(5).unwrap();
-        assert_eq!(br.position(), 5);
+        assert_eq!(br.position_bits(), 5);
     }
 }

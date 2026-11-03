@@ -21,7 +21,6 @@ impl<'a> CabacEngine<'a> {
             offset: 0,
             bits_consumed: 0,
         };
-        // Read initial 9 bits (Clause 9.3.1.2)
         for _ in 0..9 {
             let bit = engine.read_bit()?;
             engine.offset = (engine.offset << 1) | bit;
@@ -40,7 +39,7 @@ impl<'a> CabacEngine<'a> {
     fn read_bit(&mut self) -> Result<u32, H264DecodeError> {
         self.bits_consumed += 1;
         if self.byte_pos >= self.data.len() {
-            // End of slice data: return 0 (trailing bits / padding)
+
             return Ok(0);
         }
         let byte = self.data[self.byte_pos];
@@ -53,8 +52,6 @@ impl<'a> CabacEngine<'a> {
         Ok(bit)
     }
 
-    /// Decode a binary decision using context model state (Clause 9.3.3.2.1).
-    /// `state` contains `(p_state_idx: 0..63, val_mps: 0..1)`.
     pub fn decode_decision(&mut self, state: &mut (u8, u8)) -> Result<u8, H264DecodeError> {
         let (p_state_idx, val_mps) = *state;
         let q_cod_i_range_idx = ((self.range >> 6) & 3) as usize;
@@ -76,7 +73,6 @@ impl<'a> CabacEngine<'a> {
             bin
         };
 
-        // Renormalization
         while self.range < 256 {
             self.range <<= 1;
             self.offset = (self.offset << 1) | self.read_bit()?;
@@ -85,7 +81,6 @@ impl<'a> CabacEngine<'a> {
         Ok(bin_val)
     }
 
-    /// Decode in bypass mode (Clause 9.3.3.2.3).
     pub fn decode_bypass(&mut self) -> Result<u8, H264DecodeError> {
         self.offset = (self.offset << 1) | self.read_bit()?;
         if self.offset >= self.range {
@@ -96,13 +91,11 @@ impl<'a> CabacEngine<'a> {
         }
     }
 
-    /// Decode signed value in bypass mode (`val * sign`).
     pub fn decode_bypass_sign(&mut self, val: i32) -> Result<i32, H264DecodeError> {
         let sign = self.decode_bypass()?;
         if sign == 1 { Ok(-val) } else { Ok(val) }
     }
 
-    /// Decode termination flag (Clause 9.3.3.2.4).
     pub fn decode_terminate(&mut self) -> Result<u8, H264DecodeError> {
         self.range -= 2;
         if self.offset >= self.range {

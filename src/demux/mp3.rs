@@ -32,6 +32,7 @@ pub struct Mp3FrameHeader {
     pub channel_mode: ChannelMode,
     pub mode_extension: u8,
     pub frame_size: usize,
+    pub has_crc: bool,
 }
 
 impl Mp3FrameHeader {
@@ -72,6 +73,7 @@ impl Mp3FrameHeader {
         let sample_rate = Self::get_sample_rate(version, sample_rate_index)?;
 
         let padding = ((header >> 9) & 0x1) == 1;
+        let has_crc = ((header >> 16) & 0x1) == 0;
 
         let channel_mode_bits = (header >> 6) & 0x3;
         let channel_mode = match channel_mode_bits {
@@ -95,6 +97,7 @@ impl Mp3FrameHeader {
             channel_mode,
             mode_extension,
             frame_size,
+            has_crc,
         })
     }
 

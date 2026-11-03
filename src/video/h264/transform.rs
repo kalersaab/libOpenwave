@@ -24,12 +24,6 @@ const LEVEL_SCALE: [[i64; 3]; 6] = [
 
 const SCALE_CLASS_4X4: [usize; 16] = [0, 1, 0, 1, 1, 2, 1, 2, 0, 1, 0, 1, 1, 2, 1, 2];
 
-/// Inverse quantisation for the 4×4 Luma DC block used in Intra_16×16.
-///
-/// Per H.264 spec §8.5.6, every one of the 16 DC-level coefficients is
-/// rescaled using the **position-(0,0)** scale factor (class 0), regardless
-/// of its position in the 4×4 DC block.  Using the ordinary `inverse_scale_4x4`
-/// here is wrong because that function applies position-varying classes.
 pub fn inverse_scale_luma_dc(
     levels: &[i32; 16],
     qp: u8,
@@ -45,7 +39,6 @@ pub fn inverse_scale_luma_dc(
 
     let qp_div6 = u32::from(qp / 6);
     let qp_mod6 = usize::from(qp % 6);
-    // All DC positions use class 0 (i.e. the m(0,0) entry of the level-scale table).
     let class0_scale = LEVEL_SCALE[qp_mod6][0];
     let mut scaled = [0i32; 16];
 
