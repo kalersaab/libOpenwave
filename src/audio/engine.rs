@@ -3,8 +3,11 @@ use ringbuf::{
     HeapRb,
     traits::{Consumer, Producer, Split},
 };
+use std::fs::File;
 
+use crate::audio::mp3::Mp3Decoder;
 use crate::audio::resampler::LinearResampler;
+use crate::demux::mp3::Mp3Reader;
 use crate::demux::wav_stream::WavStreamReader;
 use std::{
     error::Error,
@@ -165,7 +168,18 @@ pub struct AudioEngine {
 
 impl AudioEngine {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, Box<dyn Error>> {
-        let reader = WavStreamReader::open(path)?;
+        let path_ref = path.as_ref();
+        let extension = path_ref
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+
+        if extension == "mp3" {
+            return Self::open_mp3(path_ref);
+        }
+
+        let reader = WavStreamReader::open(path_ref)?;
         let source_info = *reader.info();
 
         let source_rate = source_info.sample_rate;
@@ -485,6 +499,261 @@ impl AudioEngine {
 
     pub fn output_sample_rate(&self) -> u32 {
         self.output_rate
+    }
+}
+
+impl AudioEngine {
+    fn open_mp3(path: &Path) -> Result<Self, Box<dyn Error>> {
+        let file = File::open(path)?;
+        let mut reader = Mp3Reader::new(file)?;
+        reader.seek_to_start()?;
+
+        let mut first_header = None;
+        let mut frame_headers = Vec::new();
+        let mut frame_data_list = Vec::new();
+
+        loop {
+            match reader.find_next_frame() {
+                Ok(Some(header)) => {
+                    let data = reader.read_frame_data(&header)?;
+                    if first_header.is_none() {
+                        first_header = Some(header.clone());
+                    }
+                    frame_headers.push(header.clone());
+                    frame_data_list.push(data);
+                }
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+
+        let header = first_header.ok_or_else(|| io::Error::other("No MP3 frames found"))?;
+        let _source_rate = header.sample_rate;
+        let source_channels = header.channels();
+        let samples_per_frame = header.samples_per_frame();
+        let total_frames = frame_headers.len() as u64 * samples_per_frame as u64;
+        if total_frames == 0 {
+            return Err(io::Error::other("MP3 file contains no frames").into());
+        }
+
+        let host = cpal::default_host();
+        let device = host
+            .default_output_device()
+            .ok_or_else(|| io::Error::other("No audio output device found"))?;
+        let supported = device.default_output_config()?;
+        if supported.sample_format() != cpal::SampleFormat::F32 {
+            return Err(io::Error::other("This engine currently requires F32 audio output").into());
+        }
+        let output_rate = supported.sample_rate().0;
+        let output_channels = supported.channels() as usize;
+
+        let state = Arc::new(AtomicU8::new(PAUSED));
+        let position_frames = Arc::new(AtomicU64::new(0));
+        let seek_generation = Arc::new(AtomicU64::new(0));
+        let seek_target_frame = Arc::new(AtomicU64::new(0));
+        let finished_generation = Arc::new(AtomicU64::new(0));
+
+        let duration_frames = total_frames;
+        let ring = HeapRb::<OutputFrame>::new(BUFFER_FRAMES * 8);
+        let (mut producer, mut consumer) = ring.split();
+
+        let config: cpal::StreamConfig = supported.into();
+        let stream_state = Arc::clone(&state);
+        let stream_position = Arc::clone(&position_frames);
+        let stream_seek_generation = Arc::clone(&seek_generation);
+        let stream_finished = Arc::clone(&finished_generation);
+
+        let stream = device.build_output_stream(
+            &config,
+            move |output: &mut [f32], _| {
+                let current_gen = stream_seek_generation.load(Ordering::Acquire);
+                if stream_state.load(Ordering::Acquire) == ENDED
+                    && stream_seek_generation.load(Ordering::Acquire)
+                        == stream_finished.load(Ordering::Acquire)
+                {
+                    for sample in output.iter_mut() {
+                        *sample = 0.0;
+                    }
+                    return;
+                }
+
+                if stream_state.load(Ordering::Acquire) != PLAYING {
+                    for sample in output.iter_mut() {
+                        *sample = 0.0;
+                    }
+                    return;
+                }
+
+                let mut out_idx = 0;
+                while out_idx + output_channels <= output.len() {
+                    let (frame_opt, frame_gen) =
+                        pop_current_frame(&mut consumer, &stream_seek_generation);
+                    if frame_gen != current_gen {
+                        break;
+                    }
+                    if let Some(frame) = frame_opt {
+                        if frame.generation != frame_gen {
+                            continue;
+                        }
+                        for ch in 0..output_channels {
+                            output[out_idx + ch] = if ch < MAX_CHANNELS {
+                                frame.samples[ch]
+                            } else {
+                                0.0
+                            };
+                        }
+                        out_idx += output_channels;
+                        stream_position.store(frame.output_index + 1, Ordering::Release);
+                        if frame.output_index + 1 >= duration_frames && duration_frames > 0 {
+                            stream_state.store(ENDED, Ordering::Release);
+                            stream_finished.store(frame_gen, Ordering::Release);
+                        }
+                    } else {
+                        break;
+                    }
+                }
+
+                if out_idx == 0 {
+                    for sample in output.iter_mut().take(output_channels) {
+                        *sample = 0.0;
+                    }
+                }
+            },
+            move |err| eprintln!("Audio stream error: {err}"),
+            None,
+        )?;
+
+        stream.play()?;
+
+        let stream_state_worker = Arc::clone(&state);
+        let stream_seek_generation_worker = Arc::clone(&seek_generation);
+        let stream_seek_target_worker = Arc::clone(&seek_target_frame);
+        let stream_finished_worker = Arc::clone(&finished_generation);
+
+        let worker_handle = thread::spawn(move || {
+            let mut decoder = Mp3Decoder::new();
+            let mut current_generation: u64 = stream_seek_generation_worker.load(Ordering::Acquire);
+            let mut output_index: u64 = 0;
+
+            loop {
+                if stream_state_worker.load(Ordering::Acquire) == STOPPED {
+                    break;
+                }
+
+                let latest_gen = stream_seek_generation_worker.load(Ordering::Acquire);
+                if latest_gen != current_generation {
+                    current_generation = latest_gen;
+                    output_index = stream_seek_target_worker.load(Ordering::Acquire);
+                    if output_index >= duration_frames {
+                        stream_finished_worker.store(current_generation, Ordering::Release);
+                        stream_state_worker.store(ENDED, Ordering::Release);
+                        thread::sleep(Duration::from_millis(10));
+                        continue;
+                    } else if stream_state_worker.load(Ordering::Acquire) == ENDED {
+                        stream_state_worker.store(PAUSED, Ordering::Release);
+                    }
+                }
+
+                if stream_state_worker.load(Ordering::Acquire) != PLAYING {
+                    thread::sleep(Duration::from_millis(5));
+                    continue;
+                }
+
+                if output_index >= duration_frames {
+                    stream_finished_worker.store(current_generation, Ordering::Release);
+                    stream_state_worker.store(ENDED, Ordering::Release);
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+
+                let frame_idx = (output_index / samples_per_frame as u64) as usize;
+                if frame_idx >= frame_data_list.len() {
+                    stream_finished_worker.store(current_generation, Ordering::Release);
+                    stream_state_worker.store(ENDED, Ordering::Release);
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+
+                let decoded = match decoder
+                    .decode_frame(&frame_headers[frame_idx], &frame_data_list[frame_idx])
+                {
+                    Ok(d) => d,
+                    Err(_) => {
+                        output_index += samples_per_frame as u64;
+                        continue;
+                    }
+                };
+
+                let mut local_out = output_index;
+                if source_channels == 0 || output_channels == 0 {
+                    break;
+                }
+                let mut enqueued = false;
+                for source_frame in decoded.chunks_exact(source_channels) {
+                    if local_out >= duration_frames {
+                        break;
+                    }
+                    let mut frame = OutputFrame {
+                        samples: [0.0; MAX_CHANNELS],
+                        generation: current_generation,
+                        output_index: local_out,
+                    };
+                    if output_channels == 1 && source_channels > 1 {
+                        let sum: f32 = source_frame.iter().sum();
+                        frame.samples[0] = sum / source_channels as f32;
+                    } else {
+                        for out_channel in 0..output_channels {
+                            let source_channel = if source_channels == 1 {
+                                0
+                            } else {
+                                out_channel.min(source_channels - 1)
+                            };
+                            frame.samples[out_channel] = source_frame[source_channel];
+                        }
+                    }
+                    loop {
+                        if stream_state_worker.load(Ordering::Acquire) == STOPPED {
+                            break;
+                        }
+                        if stream_seek_generation_worker.load(Ordering::Acquire)
+                            != current_generation
+                        {
+                            break;
+                        }
+                        match producer.try_push(frame) {
+                            Ok(()) => break,
+                            Err(_) => thread::sleep(Duration::from_millis(1)),
+                        }
+                    }
+                    if stream_state_worker.load(Ordering::Acquire) == STOPPED {
+                        break;
+                    }
+                    if stream_seek_generation_worker.load(Ordering::Acquire) != current_generation {
+                        break;
+                    }
+                    local_out += 1;
+                    enqueued = true;
+                }
+                if !enqueued {
+                    break;
+                }
+                output_index = local_out;
+
+                thread::sleep(Duration::from_millis(1));
+            }
+        });
+
+        Ok(Self {
+            stream: Some(stream),
+            state,
+            position_frames,
+            seek_generation,
+            seek_target_frame,
+            finished_generation,
+            duration_frames,
+            output_rate,
+            worker: Some(worker_handle),
+        })
     }
 }
 

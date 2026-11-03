@@ -5,7 +5,6 @@ use crate::video::h264::{
     slice::SliceType,
 };
 
-
 pub fn decode_mb_skip_flag(
     engine: &mut CabacEngine<'_>,
     contexts: &mut CabacContexts,
@@ -27,7 +26,6 @@ pub fn decode_mb_skip_flag(
     Ok(flag == 1)
 }
 
-/// Decodes mb_type in an I-slice (Clause 7.3.5 / Table 9-34).
 pub fn decode_i_slice_mb_type(
     engine: &mut CabacEngine<'_>,
     contexts: &mut CabacContexts,
@@ -50,7 +48,6 @@ pub fn decode_i_slice_mb_type(
         return Ok(MacroblockType::Ipcm);
     }
 
-    
     let cbp_luma_nz = engine.decode_decision(&mut contexts.states[6])?;
     let mut cbp_chroma = 0;
     if engine.decode_decision(&mut contexts.states[7])? == 1 {
@@ -74,7 +71,6 @@ pub fn decode_i_slice_mb_type(
     })
 }
 
-
 pub fn decode_p_slice_mb_type(
     engine: &mut CabacEngine<'_>,
     contexts: &mut CabacContexts,
@@ -83,29 +79,29 @@ pub fn decode_p_slice_mb_type(
 ) -> Result<Option<MacroblockType>, H264DecodeError> {
     let b0 = engine.decode_decision(&mut contexts.states[14])?;
     if b0 == 0 {
-        // Inter P-macroblock
+
         let b1 = engine.decode_decision(&mut contexts.states[15])?;
         if b1 == 0 {
             let b2 = engine.decode_decision(&mut contexts.states[16])?;
             if b2 == 0 {
-                // P_16x16: caller will fill reference_index, mvd, and cbp
+
                 Ok(None)
             } else {
                 eprintln!("[decode_p_slice_mb_type] P_8x8 (b0=0, b1=0, b2=1)");
-                Ok(None) // P_8x8 treated as P_16x16 fallback
+                Ok(None)
             }
         } else {
             let b2 = engine.decode_decision(&mut contexts.states[17])?;
             if b2 == 0 {
                 eprintln!("[decode_p_slice_mb_type] P_16x8 (b0=0, b1=1, b2=0)");
-                Ok(None) // P_16x8
+                Ok(None)
             } else {
                 eprintln!("[decode_p_slice_mb_type] P_8x16 (b0=0, b1=1, b2=1)");
-                Ok(None) // P_8x16
+                Ok(None)
             }
         }
     } else {
-        // Intra in P-slice
+
         eprintln!("[decode_p_slice_mb_type] Intra in P-slice (b0=1)");
         if engine.decode_decision(&mut contexts.states[17])? == 0 {
             return Ok(Some(MacroblockType::Intra4x4));
@@ -132,7 +128,6 @@ pub fn decode_p_slice_mb_type(
     }
 }
 
-/// Decodes reference frame index (Clause 7.3.5.2 / Table 9-39).
 pub fn decode_cabac_ref_idx(
     engine: &mut CabacEngine<'_>,
     contexts: &mut CabacContexts,
@@ -163,12 +158,11 @@ pub fn decode_cabac_ref_idx(
     Ok(ref_idx)
 }
 
-
 pub fn decode_cabac_mvd(
     engine: &mut CabacEngine<'_>,
     contexts: &mut CabacContexts,
     amvd: i32,
-    ctx_base: usize, // 40 for horizontal, 47 for vertical
+    ctx_base: usize,
 ) -> Result<i32, H264DecodeError> {
     let ctx_inc = if amvd < 3 {
         0
@@ -210,7 +204,6 @@ pub fn decode_cabac_mvd(
     Ok(if sign == 1 { -mvd } else { mvd })
 }
 
-/// Decodes coded block pattern for luma (4 bits) and chroma (2 bits) (Clause 7.3.5.3.1).
 pub fn decode_cabac_cbp(
     engine: &mut CabacEngine<'_>,
     contexts: &mut CabacContexts,
@@ -219,23 +212,18 @@ pub fn decode_cabac_cbp(
 ) -> Result<u32, H264DecodeError> {
     let mut cbp = 0u32;
 
-    
     let ctx0 = usize::from((left_cbp & 0x02) == 0) + 2 * usize::from((top_cbp & 0x04) == 0);
     cbp |= engine.decode_decision(&mut contexts.states[73 + ctx0])? as u32;
 
-    
     let ctx1 = usize::from((cbp & 0x01) == 0) + 2 * usize::from((top_cbp & 0x08) == 0);
     cbp |= (engine.decode_decision(&mut contexts.states[73 + ctx1])? as u32) << 1;
 
-    
     let ctx2 = usize::from((left_cbp & 0x08) == 0) + 2 * usize::from((cbp & 0x01) == 0);
     cbp |= (engine.decode_decision(&mut contexts.states[73 + ctx2])? as u32) << 2;
 
-    
     let ctx3 = usize::from((cbp & 0x04) == 0) + 2 * usize::from((cbp & 0x02) == 0);
     cbp |= (engine.decode_decision(&mut contexts.states[73 + ctx3])? as u32) << 3;
 
-    
     let cbp_a = (left_cbp >> 4) & 0x03;
     let cbp_b = (top_cbp >> 4) & 0x03;
 
@@ -262,7 +250,6 @@ pub fn decode_cabac_cbp(
 
     Ok(cbp)
 }
-
 
 pub fn decode_cabac_mb_qp_delta(
     engine: &mut CabacEngine<'_>,
@@ -292,7 +279,6 @@ pub fn decode_cabac_mb_qp_delta(
     Ok(delta)
 }
 
-/// Decodes intra chroma prediction mode (Clause 7.3.5.1 / Table 9-39).
 pub fn decode_cabac_chroma_pred_mode(
     engine: &mut CabacEngine<'_>,
     contexts: &mut CabacContexts,
@@ -318,7 +304,6 @@ pub fn decode_cabac_chroma_pred_mode(
     }
     Ok(3)
 }
-
 
 pub fn decode_intra4x4_pred_mode(
     engine: &mut CabacEngine<'_>,

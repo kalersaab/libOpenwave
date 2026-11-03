@@ -1,193 +1,189 @@
 use crate::audio::mp3::bitstream::Mp3BitReader;
+use crate::audio::mp3::tables::*;
+use crate::audio::mp3::types::{BlockType, FrameHeader, GranuleChannelSideInfo};
 use std::io;
 
-pub struct HuffmanTable {
-    pub linbits: u8,
-    pub max_len: u8,
-}
-
-impl HuffmanTable {
-    pub const fn new(linbits: u8, max_len: u8) -> Self {
-        HuffmanTable { linbits, max_len }
+pub fn read_huffman(
+    reader: &mut Mp3BitReader,
+    header: &FrameHeader,
+    side_info: &GranuleChannelSideInfo,
+    len: u32,
+    samples: &mut [f32; 576],
+) -> io::Result<u32> {
+    if len == 0 {
+        for sample in samples.iter_mut() {
+            *sample = 0.0;
+        }
+        return Ok(0);
     }
 
-    pub fn decode(&self, br: &mut Mp3BitReader) -> io::Result<(i16, i16)> {
-        let mut code = 0u32;
+    let mut bits_read = 0;
 
-        for len in 1..=self.max_len {
-            let bit = br.read_bit()? as u32;
-            code = (code << 1) | bit;
 
-            if let Some((x, y)) = self.lookup(code, len) {
-                let mut x_val = x;
-                let mut y_val = y;
+    let (region1_start, region2_start) =
+        if side_info.block_type == BlockType::Short || side_info.block_type == BlockType::Mixed {
+            (36, 576)
+        } else {
+            (
+                SCALE_FACTOR_BAND_INDICES[header.sample_rate_table].0
+                    [side_info.region0_count as usize + 1],
+                SCALE_FACTOR_BAND_INDICES[header.sample_rate_table].0
+                    [side_info.region0_count as usize + side_info.region1_count as usize + 2],
+            )
+        };
 
-                if self.linbits > 0 {
-                    if x_val == 15 {
-                        let linbits_val = br.read_bits(self.linbits)? as i16;
-                        x_val += linbits_val;
-                    }
-                    if y_val == 15 {
-                        let linbits_val = br.read_bits(self.linbits)? as i16;
-                        y_val += linbits_val;
-                    }
+
+    let mut is_pos: usize = 0;
+    let is_len = side_info.big_values as usize * 2;
+    let mut state: HuffmanState = Default::default();
+    while is_pos < is_len {
+        let table_num = if is_pos < region1_start as usize {
+            side_info.table_select[0]
+        } else if is_pos < region2_start as usize {
+            side_info.table_select[1]
+        } else {
+            side_info.table_select[2]
+        };
+
+        let huffman_table = &HUFFMAN_TABLES[table_num as usize];
+
+        bits_read += huffman_decode(reader, huffman_table, &mut state)?;
+
+        samples[is_pos] = state.x as f32;
+        is_pos += 1;
+        samples[is_pos] = state.y as f32;
+        is_pos += 1;
+    }
+
+
+    let table_num = if side_info.count1table_select { 33 } else { 32 };
+    let huffman_table = &HUFFMAN_TABLES[table_num];
+    is_pos = is_len;
+    while is_pos <= 572 && bits_read < len as usize {
+        bits_read += huffman_decode(reader, huffman_table, &mut state)?;
+        samples[is_pos] = state.v as f32;
+        is_pos += 1;
+        samples[is_pos] = state.w as f32;
+        is_pos += 1;
+        samples[is_pos] = state.x as f32;
+        is_pos += 1;
+        samples[is_pos] = state.y as f32;
+        is_pos += 1;
+    }
+
+    if bits_read < len as usize {
+        reader.skip_bits((len as usize).saturating_sub(bits_read))?;
+    } else if bits_read > len as usize {
+        is_pos -= 4;
+    }
+
+    for sample in &mut samples[is_pos..576] {
+        *sample = 0.0;
+    }
+
+    Ok(is_pos as u32)
+}
+
+#[derive(Debug, Default)]
+struct HuffmanState {
+    x: i32,
+    y: i32,
+    v: i32,
+    w: i32,
+}
+fn huffman_decode(
+    reader: &mut Mp3BitReader,
+    huffman_table: &HuffmanTable,
+    state: &mut HuffmanState,
+) -> io::Result<usize> {
+    let mut point = 0;
+    let mut bits_left = 32;
+    let mut bits_read = 0;
+    if !huffman_table.data.is_empty() {
+        loop {
+            if huffman_table.data[point] & 0xff00 == 0 {
+                state.x = ((huffman_table.data[point] >> 4) & 0xf).into();
+                state.y = (huffman_table.data[point] & 0xf).into();
+                break;
+            }
+
+            bits_read += 1;
+            if reader.read_bit()? {
+                while (huffman_table.data[point] & 0xff) >= 250 {
+                    point += (huffman_table.data[point] & 0xff) as usize;
                 }
-
-                if x_val != 0 && br.read_bit()? {
-                    x_val = -x_val;
+                point += (huffman_table.data[point] & 0xff) as usize;
+            } else {
+                while (huffman_table.data[point] >> 8) >= 250 {
+                    point += (huffman_table.data[point] >> 8) as usize;
                 }
-                if y_val != 0 && br.read_bit()? {
-                    y_val = -y_val;
-                }
+                point += (huffman_table.data[point] >> 8) as usize;
+            }
 
-                return Ok((x_val, y_val));
+            bits_left -= 1;
+            if bits_left <= 0 || point >= huffman_table.data.len() {
+                break;
             }
         }
 
-        Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Invalid MP3 Huffman code",
-        ))
-    }
+        if huffman_table.quads {
+            state.v = (state.y >> 3) & 1;
+            state.w = (state.y >> 2) & 1;
+            state.x = (state.y >> 1) & 1;
+            state.y &= 1;
 
-    fn lookup(&self, code: u32, len: u8) -> Option<(i16, i16)> {
-        match (code, len) {
-            (0b0, 1) => Some((0, 0)),
-            (0b01, 2) => Some((0, 1)),
-            (0b10, 2) => Some((1, 0)),
-            (0b11, 2) => Some((1, 1)),
-            _ => None,
-        }
-    }
-}
-
-pub fn get_huffman_table(index: u8) -> Option<&'static HuffmanTable> {
-    static TABLES: [HuffmanTable; 33] = [
-        HuffmanTable::new(0, 0),
-        HuffmanTable::new(0, 4),
-        HuffmanTable::new(0, 4),
-        HuffmanTable::new(0, 4),
-        HuffmanTable::new(0, 4),
-        HuffmanTable::new(0, 4),
-        HuffmanTable::new(0, 6),
-        HuffmanTable::new(0, 6),
-        HuffmanTable::new(0, 6),
-        HuffmanTable::new(0, 6),
-        HuffmanTable::new(0, 6),
-        HuffmanTable::new(0, 8),
-        HuffmanTable::new(0, 8),
-        HuffmanTable::new(0, 12),
-        HuffmanTable::new(0, 12),
-        HuffmanTable::new(0, 12),
-        HuffmanTable::new(1, 13),
-        HuffmanTable::new(2, 13),
-        HuffmanTable::new(3, 13),
-        HuffmanTable::new(4, 13),
-        HuffmanTable::new(6, 13),
-        HuffmanTable::new(8, 13),
-        HuffmanTable::new(10, 13),
-        HuffmanTable::new(13, 13),
-        HuffmanTable::new(4, 12),
-        HuffmanTable::new(5, 12),
-        HuffmanTable::new(6, 12),
-        HuffmanTable::new(7, 12),
-        HuffmanTable::new(8, 12),
-        HuffmanTable::new(9, 12),
-        HuffmanTable::new(11, 12),
-        HuffmanTable::new(13, 12),
-        HuffmanTable::new(0, 4),
-    ];
-
-    if (index as usize) < TABLES.len() {
-        Some(&TABLES[index as usize])
-    } else {
-        None
-    }
-}
-
-pub fn decode_quad(br: &mut Mp3BitReader, table_select: bool) -> io::Result<[i16; 4]> {
-    let code = br.read_bits(4)? as u8;
-
-    let values = if table_select {
-        match code {
-            0b0000 => [0, 0, 0, 0],
-            0b0001 => [0, 0, 0, 1],
-            0b0010 => [0, 0, 1, 0],
-            0b0011 => [0, 0, 1, 1],
-            0b0100 => [0, 1, 0, 0],
-            0b0101 => [0, 1, 0, 1],
-            0b0110 => [0, 1, 1, 0],
-            0b0111 => [0, 1, 1, 1],
-            0b1000 => [1, 0, 0, 0],
-            0b1001 => [1, 0, 0, 1],
-            0b1010 => [1, 0, 1, 0],
-            0b1011 => [1, 0, 1, 1],
-            0b1100 => [1, 1, 0, 0],
-            0b1101 => [1, 1, 0, 1],
-            0b1110 => [1, 1, 1, 0],
-            0b1111 => [1, 1, 1, 1],
-            _ => unreachable!(),
-        }
-    } else {
-        match code {
-            0b0000 => [0, 0, 0, 0],
-            0b0001 => [0, 0, 0, 1],
-            0b0010 => [0, 0, 1, 0],
-            0b0011 => [0, 1, 0, 0],
-            0b0100 => [1, 0, 0, 0],
-            0b0101 => [0, 0, 1, 1],
-            0b0110 => [0, 1, 0, 1],
-            0b0111 => [1, 0, 0, 1],
-            0b1000 => [0, 1, 1, 0],
-            0b1001 => [1, 0, 1, 0],
-            0b1010 => [1, 1, 0, 0],
-            0b1011 => [0, 1, 1, 1],
-            0b1100 => [1, 0, 1, 1],
-            0b1101 => [1, 1, 0, 1],
-            0b1110 => [1, 1, 1, 0],
-            0b1111 => [1, 1, 1, 1],
-            _ => unreachable!(),
-        }
-    };
-
-    let mut result = [0i16; 4];
-    for (i, &val) in values.iter().enumerate() {
-        result[i] = if val == 0 {
-            0
-        } else if br.read_bit()? {
-            -1
+            if state.v > 0 {
+                bits_read += 1;
+                if reader.read_bit()? {
+                    state.v = -state.v;
+                }
+            }
+            if state.w > 0 {
+                bits_read += 1;
+                if reader.read_bit()? {
+                    state.w = -state.w;
+                }
+            }
+            if state.x > 0 {
+                bits_read += 1;
+                if reader.read_bit()? {
+                    state.x = -state.x;
+                }
+            }
+            if state.y > 0 {
+                bits_read += 1;
+                if reader.read_bit()? {
+                    state.y = -state.y;
+                }
+            }
         } else {
-            1
-        };
+            if huffman_table.linbits > 0 && state.x == 15 {
+                bits_read += huffman_table.linbits;
+
+                state.x += reader.read_bits(huffman_table.linbits as u8)? as i32;
+            }
+
+            if state.x > 0 {
+                bits_read += 1;
+                if reader.read_bit()? {
+                    state.x = -state.x;
+                }
+            }
+
+            if huffman_table.linbits > 0 && state.y == 15 {
+                bits_read += huffman_table.linbits;
+                state.y += reader.read_bits(huffman_table.linbits as u8)? as i32;
+            }
+
+            if state.y > 0 {
+                bits_read += 1;
+                if reader.read_bit()? {
+                    state.y = -state.y;
+                }
+            }
+        }
+    } else {
+        *state = Default::default();
     }
-
-    Ok(result)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn gets_huffman_table() {
-        assert!(get_huffman_table(0).is_some());
-        assert!(get_huffman_table(32).is_some());
-        assert!(get_huffman_table(33).is_none());
-    }
-
-    #[test]
-    fn table_has_linbits() {
-        let table = get_huffman_table(16).unwrap();
-        assert_eq!(table.linbits, 1);
-    }
-
-    #[test]
-    fn decodes_simple_huffman() {
-        let data = [0b0_0000000];
-        let mut br = Mp3BitReader::new(&data);
-
-        let table = get_huffman_table(1).unwrap();
-        let (x, y) = table.decode(&mut br).unwrap();
-        assert_eq!((x, y), (0, 0));
-    }
+    Ok(bits_read)
 }

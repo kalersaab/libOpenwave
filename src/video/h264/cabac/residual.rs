@@ -14,7 +14,6 @@ const COEFF_ABS_LEVELGT1_CTX: [usize; 8] = [5, 5, 5, 5, 6, 7, 8, 9];
 const COEFF_ABS_LEVEL_TRANS_LEVEL1: [usize; 8] = [1, 2, 3, 3, 4, 5, 6, 7];
 const COEFF_ABS_LEVEL_TRANS_LEVELGT1: [usize; 8] = [4, 4, 4, 4, 5, 6, 7, 7];
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResidualCategory {
     LumaDc = 0,
@@ -23,8 +22,6 @@ pub enum ResidualCategory {
     ChromaDc = 3,
     ChromaAc = 4,
 }
-
-
 
 pub fn decode_cabac_residual_block(
     engine: &mut CabacEngine<'_>,
@@ -35,7 +32,6 @@ pub fn decode_cabac_residual_block(
 ) -> Result<([i32; 16], usize), H264DecodeError> {
     let cat = category as usize;
 
-    // 1. Decode Coded Block Flag (CBF)
     let cbf_ctx = CBF_BASE_CTX[cat] + (cond_a_nz as usize) + 2 * (cond_b_nz as usize);
     let cbf = engine.decode_decision(&mut contexts.states[cbf_ctx])?;
     if cbf == 0 {
@@ -52,7 +48,7 @@ pub fn decode_cabac_residual_block(
     let last_base = LAST_COEFF_FLAG_OFFSET[cat];
     let abs_base = COEFF_ABS_LEVEL_M1_OFFSET[cat];
 
-    // 2. Decode Significance Map
+
     let mut coeff_indices = Vec::with_capacity(max_coeff);
     let mut reached_end = true;
 
@@ -77,7 +73,6 @@ pub fn decode_cabac_residual_block(
         return Ok(([0i32; 16], 0));
     }
 
-    // 3. Decode Absolute Levels and Signs (in reverse order)
     let mut block = [0i32; 16];
     let mut node_ctx = 0;
 
@@ -116,7 +111,6 @@ pub fn decode_cabac_residual_block(
             abs_level as i32
         };
 
-        // Map scan_idx to output block position
         let target_idx = match category {
             ResidualCategory::Luma4x4 => ZIGZAG_4X4[scan_idx],
             ResidualCategory::LumaAc | ResidualCategory::ChromaAc => ZIGZAG_4X4[scan_idx + 1],

@@ -1,14 +1,11 @@
-
-
-
 use std::io;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AacProfile {
     Main = 1,
-    Lc = 2,  
-    Ssr = 3, 
-    Ltp = 4, 
+    Lc = 2,
+    Ssr = 3,
+    Ltp = 4,
 }
 
 impl AacProfile {
@@ -112,7 +109,6 @@ impl AacConfig {
             ));
         }
 
-        
         let frame_length = 1024;
 
         Ok(AacConfig {
@@ -127,8 +123,6 @@ impl AacConfig {
         self.sample_rate.to_hz()
     }
 }
-
-
 
 #[derive(Debug, Clone)]
 pub struct AdtsHeader {
@@ -147,7 +141,6 @@ impl AdtsHeader {
             ));
         }
 
-        
         if data[0] != 0xFF || (data[1] & 0xF0) != 0xF0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -178,9 +171,6 @@ impl AdtsHeader {
     }
 }
 
-
-
-
 pub struct AacDecoder {
     config: AacConfig,
 }
@@ -199,19 +189,7 @@ impl AacDecoder {
         &self.config
     }
 
-    
-    
-    
     pub fn decode_frame(&mut self, _data: &[u8]) -> io::Result<Vec<f32>> {
-        
-        
-        
-        
-        
-        
-        
-        
-        
         let sample_count = self.config.frame_length as usize * self.config.channels as usize;
         Ok(vec![0.0; sample_count])
     }
@@ -235,11 +213,6 @@ mod tests {
 
     #[test]
     fn parses_aac_lc_44100_stereo_config() {
-        
-        
-        
-        
-        
         let config_data = [0x12, 0x10];
 
         let config = AacConfig::from_audio_specific_config(&config_data).unwrap();
@@ -252,7 +225,6 @@ mod tests {
 
     #[test]
     fn parses_aac_lc_48000_stereo_config() {
-        
         let config_data = [0x11, 0x90];
 
         let config = AacConfig::from_audio_specific_config(&config_data).unwrap();
@@ -264,23 +236,14 @@ mod tests {
 
     #[test]
     fn rejects_invalid_aac_config() {
-        
         assert!(AacConfig::from_audio_specific_config(&[0x12]).is_err());
 
-        
         assert!(AacConfig::from_audio_specific_config(&[0x00, 0x10]).is_err());
     }
 
     #[test]
     fn parses_adts_header() {
-        
-        let adts_data = [
-            0xFF, 0xF1, 
-            0x50, 
-            0x80, 
-            0x01, 0x20, 
-            0xFC, 
-        ];
+        let adts_data = [0xFF, 0xF1, 0x50, 0x80, 0x01, 0x20, 0xFC];
 
         let header = AdtsHeader::parse(&adts_data).unwrap();
 
@@ -297,7 +260,7 @@ mod tests {
 
     #[test]
     fn creates_decoder_from_config() {
-        let config_data = [0x12, 0x10]; 
+        let config_data = [0x12, 0x10];
 
         let decoder = AacDecoder::from_audio_specific_config(&config_data).unwrap();
 
@@ -313,7 +276,6 @@ mod tests {
 
         let samples = decoder.decode_frame(&[0u8; 100]).unwrap();
 
-        
         assert_eq!(samples.len(), 2048);
     }
 }
