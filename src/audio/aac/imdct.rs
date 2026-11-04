@@ -1,99 +1,190 @@
+// Symphonia AAC-LC decoder port.
+// Copyright (c) 2019-2026 The Project Symphonia Developers.
+// This file is licensed under the Mozilla Public License, v. 2.0.
+
 use std::f32::consts::PI;
+
+#[derive(Clone, Copy, Default)]
+struct Complex {
+    re: f32,
+    im: f32,
+}
+
+impl Complex {
+    fn new(re: f32, im: f32) -> Self {
+        Complex { re, im }
+    }
+
+    fn mul(self, other: Self) -> Self {
+        Complex {
+            re: self.re * other.re - self.im * other.im,
+            im: self.re * other.im + self.im * other.re,
+        }
+    }
+
+    fn add(self, other: Self) -> Self {
+        Complex {
+            re: self.re + other.re,
+            im: self.im + other.im,
+        }
+    }
+
+    fn sub(self, other: Self) -> Self {
+        Complex {
+            re: self.re - other.re,
+            im: self.im - other.im,
+        }
+    }
+
+    fn conj(self) -> Self {
+        Complex {
+            re: self.re,
+            im: -self.im,
+        }
+    }
+}
+
+struct Fft {
+    n: usize,
+    perm: Vec<usize>,
+    twiddles: Vec<Complex>,
+}
+
+impl Fft {
+    fn new(n: usize) -> Self {
+        assert!(n.is_power_of_two());
+        let bits = n.trailing_zeros() as usize;
+        let shift = usize::BITS as usize - bits;
+        let perm = (0..n).map(|i| i.reverse_bits() >> shift).collect();
+        let twiddles = (0..n / 2)
+            .map(|k| {
+                let angle = 2.0 * PI * k as f32 / n as f32;
+                Complex::new(angle.cos(), -angle.sin())
+            })
+            .collect();
+        Fft { n, perm, twiddles }
+    }
+
+    fn fft_inplace(&self, x: &mut [Complex]) {
+        assert_eq!(x.len(), self.n);
+        for (i, &j) in self.perm.iter().enumerate() {
+            if i < j {
+                x.swap(i, j);
+            }
+        }
+
+        let mut len = 2;
+        while len <= self.n {
+            let step = self.n / len;
+            for start in (0..self.n).step_by(len) {
+                for k in 0..len / 2 {
+                    let w = self.twiddles[k * step];
+                    let u = x[start + k];
+                    let v = x[start + k + len / 2].mul(w);
+                    x[start + k] = u.add(v);
+                    x[start + k + len / 2] = u.sub(v);
+                }
+            }
+            len <<= 1;
+        }
+    }
+}
 
 pub struct Imdct {
     n: usize,
-    _cos_tab: Vec<f32>,
-    _sin_tab: Vec<f32>,
+    fft: Fft,
+    scratch: Vec<Complex>,
+    twiddle: Vec<Complex>,
 }
 
 impl Imdct {
     pub fn new(n: usize) -> Self {
+        Imdct::new_scaled(n, 1.0)
+    }
+
+    pub fn new_scaled(n: usize, scale: f64) -> Self {
+        assert!(n.is_power_of_two());
         let n2 = n / 2;
-        let _n4 = n / 4;
+        let mut twiddle = Vec::with_capacity(n2);
 
-        let mut cos_tab = vec![0.0; _n4];
-        let mut sin_tab = vec![0.0; _n4];
+        let alpha = 1.0 / 8.0
+            + if scale.is_sign_positive() {
+                0.0
+            } else {
+                n2 as f64
+            };
+        let pi_n = PI as f64 / n as f64;
+        let sqrt_scale = scale.abs().sqrt();
 
-        for i in 0.._n4 {
-            let angle = PI * (i as f32 + 0.5) / (n2 as f32);
-            cos_tab[i] = angle.cos();
-            sin_tab[i] = angle.sin();
+        for k in 0..n2 {
+            let theta = pi_n * (alpha + k as f64);
+            let re = sqrt_scale * theta.cos();
+            let im = sqrt_scale * theta.sin();
+            twiddle.push(Complex::new(re as f32, im as f32));
         }
+
+        let scratch = vec![Complex::default(); n2];
 
         Imdct {
             n,
-            _cos_tab: cos_tab,
-            _sin_tab: sin_tab,
+            fft: Fft::new(n2),
+            scratch,
+            twiddle,
         }
     }
 
-    pub fn process(&self, input: &[f32], output: &mut [f32]) {
-        assert_eq!(input.len(), self.n / 2);
-        assert_eq!(output.len(), self.n);
-
+    pub fn imdct(&mut self, spec: &[f32], out: &mut [f32]) {
         let n = self.n;
-        let n2 = n / 2;
-        let _n4 = n / 4;
+        let n2 = n >> 1;
+        let n4 = n >> 2;
 
-        for (i, output_sample) in output.iter_mut().enumerate() {
-            let mut sum = 0.0;
+        assert_eq!(spec.len(), n);
+        assert_eq!(out.len(), 2 * n);
 
-            for (k, &input_val) in input.iter().enumerate().take(n2) {
-                let angle = PI / n as f32 * (i as f32 + 0.5 + n2 as f32 / 2.0) * (k as f32 + 0.5);
-                sum += input_val * angle.cos();
-            }
+        for (i, (&w, t)) in self.twiddle.iter().zip(self.scratch.iter_mut()).enumerate() {
+            let even = spec[i * 2];
+            let odd = -spec[n - 1 - i * 2];
 
-            *output_sample = sum * (2.0 / n as f32).sqrt();
-        }
-    }
-
-    pub fn process_long(&self, input: &[f32], output: &mut [f32], prev_overlap: &[f32]) {
-        assert_eq!(self.n, 1024);
-
-        let mut temp = vec![0.0; 1024];
-        self.process(input, &mut temp);
-
-        for i in 0..512 {
-            output[i] = temp[i] * Self::window_long(i, false) + prev_overlap[i];
+            let re = odd * w.im - even * w.re;
+            let im = odd * w.re + even * w.im;
+            *t = Complex::new(re, im);
         }
 
-        for i in 512..1024 {
-            output[i] = temp[i] * Self::window_long(i, true);
+        self.fft.fft_inplace(&mut self.scratch);
+
+        let (vec0, vec1) = out.split_at_mut(n2);
+        let (vec1, vec2) = vec1.split_at_mut(n2);
+        let (vec2, vec3) = vec2.split_at_mut(n2);
+
+        for (i, (x, &w)) in self.scratch[..n4]
+            .iter()
+            .zip(self.twiddle[..n4].iter())
+            .enumerate()
+        {
+            let val = w.mul(x.conj());
+            let fi = 2 * i;
+            let ri = n2 - 1 - 2 * i;
+
+            vec0[ri] = -val.im;
+            vec1[fi] = val.im;
+            vec2[ri] = val.re;
+            vec3[fi] = val.re;
         }
-    }
 
-    pub fn process_short(&self, input: &[&[f32]; 8], output: &mut [f32], prev_overlap: &[f32]) {
-        assert_eq!(self.n, 128);
+        for (i, (x, &w)) in self.scratch[n4..]
+            .iter()
+            .zip(self.twiddle[n4..].iter())
+            .enumerate()
+        {
+            let val = w.mul(x.conj());
+            let fi = 2 * i;
+            let ri = n2 - 1 - 2 * i;
 
-        let mut temp_outputs = [[0.0f32; 128]; 8];
-
-        for (i, &inp) in input.iter().enumerate() {
-            self.process(inp, &mut temp_outputs[i]);
+            vec0[fi] = -val.re;
+            vec1[ri] = val.re;
+            vec2[fi] = val.im;
+            vec3[ri] = val.im;
         }
-
-        output[..512].copy_from_slice(prev_overlap);
-
-        for (win_idx, temp) in temp_outputs.iter().enumerate() {
-            let offset = 448 + win_idx * 128;
-
-            for i in 0..128 {
-                if offset + i < 1024 {
-                    output[offset + i] += temp[i] * Self::window_short(i);
-                }
-            }
-        }
-    }
-
-    fn window_long(i: usize, second_half: bool) -> f32 {
-        if !second_half {
-            ((i as f32 + 0.5) * PI / 1024.0).sin()
-        } else {
-            ((i as f32 - 511.5) * PI / 1024.0).cos()
-        }
-    }
-
-    fn window_short(i: usize) -> f32 {
-        ((i as f32 + 0.5) * PI / 128.0).sin()
     }
 }
 
@@ -101,45 +192,35 @@ impl Imdct {
 mod tests {
     use super::*;
 
-    #[test]
-    fn creates_imdct_1024() {
-        let imdct = Imdct::new(1024);
-        assert_eq!(imdct.n, 1024);
-        assert_eq!(imdct._cos_tab.len(), 256);
+    fn imdct_analytical(x: &[f32], y: &mut [f32], scale: f64) {
+        assert!(y.len() == 2 * x.len());
+        let n_in = x.len();
+        let n_out = x.len() << 1;
+        let pi_2n = std::f64::consts::PI / (2 * n_out) as f64;
+        for (i, item) in y.iter_mut().enumerate().take(n_out) {
+            let accum: f64 = x
+                .iter()
+                .copied()
+                .map(f64::from)
+                .enumerate()
+                .map(|(j, jtem)| jtem * (pi_2n * ((2 * i + 1 + n_in) * (2 * j + 1)) as f64).cos())
+                .sum();
+            *item = (scale * accum) as f32;
+        }
     }
 
     #[test]
-    fn creates_imdct_128() {
-        let imdct = Imdct::new(128);
-        assert_eq!(imdct.n, 128);
-        assert_eq!(imdct._cos_tab.len(), 32);
-    }
-
-    #[test]
-    fn processes_impulse() {
-        let imdct = Imdct::new(128);
-        let mut input = vec![0.0; 64];
-        input[0] = 1.0;
-
-        let mut output = vec![0.0; 128];
-        imdct.process(&input, &mut output);
-
-        assert!(!output.iter().all(|&x| x == 0.0));
-    }
-
-    #[test]
-    fn window_long_symmetric() {
-        let w1 = Imdct::window_long(0, false);
-        let w2 = Imdct::window_long(1023, true);
-
-        assert!((w1 - w2).abs() < 0.001);
-    }
-
-    #[test]
-    fn window_short_symmetric() {
-        let w1 = Imdct::window_short(0);
-        let w2 = Imdct::window_short(127);
-
-        assert!((w1 - w2).abs() < 0.001);
+    fn verify_imdct() {
+        let test: Vec<f32> = (1..=32).map(|v| v as f32).collect();
+        let mut actual = [0f32; 64];
+        let mut expected = [0f32; 64];
+        let scale = (2.0f64 / 64.0).sqrt();
+        imdct_analytical(&test, &mut expected, scale);
+        let mut mdct = Imdct::new_scaled(32, scale);
+        mdct.imdct(&test, &mut actual);
+        for i in 0..64 {
+            let delta = f64::from(actual[i]) - f64::from(expected[i]);
+            assert!(delta.abs() < 0.00001);
+        }
     }
 }

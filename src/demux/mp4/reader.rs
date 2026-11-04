@@ -19,7 +19,6 @@ impl<R: Read + Seek> Mp4Reader<R> {
 
         let file_size = reader.seek(SeekFrom::End(0))?;
         reader.seek(SeekFrom::Start(0))?;
-        eprintln!("[MP4Reader] File size: {} bytes", file_size);
 
         loop {
             let pos = reader.stream_position()?;
@@ -27,33 +26,16 @@ impl<R: Read + Seek> Mp4Reader<R> {
             let header = match parse_box_header_allow_eof(&mut reader) {
                 Ok(h) => h,
                 Err(Mp4Error::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                    eprintln!("[MP4Reader] Reached EOF at position {}", pos);
                     break;
                 }
                 Err(e) => {
-                    eprintln!(
-                        "[MP4Reader] Error parsing box header at position {}: {}",
-                        pos, e
-                    );
                     return Err(e);
                 }
             };
 
-            eprintln!(
-                "[MP4Reader] Found box type {:?} at pos {}, size: {}, content_size: {}",
-                header.box_type,
-                pos,
-                header.size,
-                header.size - header.header_size
-            );
-
             let content_size = header.size - header.header_size;
 
             if pos + header.size > file_size && header.box_type != BoxType::MDAT {
-                eprintln!(
-                    "[MP4Reader] Warning: Box at {} with size {} extends beyond file (file size: {})",
-                    pos, header.size, file_size
-                );
                 return Err(Mp4Error::InvalidFormat("Box size extends beyond file"));
             }
 
@@ -78,16 +60,8 @@ impl<R: Read + Seek> Mp4Reader<R> {
                     )?;
                     let after_moov_pos = reader.stream_position()?;
                     let expected_pos = moov_start + header.size;
-                    eprintln!(
-                        "[MP4Reader] After moov: current position = {}, expected = {}",
-                        after_moov_pos, expected_pos
-                    );
 
                     if after_moov_pos != expected_pos {
-                        eprintln!(
-                            "[MP4Reader] Position mismatch after moov! Seeking to {}",
-                            expected_pos
-                        );
                         reader.seek(SeekFrom::Start(expected_pos))?;
                     }
                 }
@@ -105,8 +79,6 @@ impl<R: Read + Seek> Mp4Reader<R> {
             return Err(Mp4Error::MissingBox("moov/trak"));
         }
 
-        eprintln!("[MP4Reader] Successfully parsed {} track(s)", tracks.len());
-
         Ok(Self {
             reader,
             tracks,
@@ -123,66 +95,37 @@ impl<R: Read + Seek> Mp4Reader<R> {
     ) -> Mp4Result<()> {
         let start_pos = reader.stream_position()?;
         let end_pos = start_pos + size;
-        eprintln!(
-            "[MP4Reader] Parsing moov: start={}, end={}, size={}",
-            start_pos, end_pos, size
-        );
 
         while reader.stream_position()? < end_pos {
-            let pos = reader.stream_position()?;
             let header = match parse_box_header(reader) {
                 Ok(h) => h,
                 Err(e) => {
-                    eprintln!(
-                        "[MP4Reader] Error parsing box header in moov at position {}: {}",
-                        pos, e
-                    );
                     return Err(e);
                 }
             };
             let content_size = header.size - header.header_size;
-            eprintln!(
-                "[MP4Reader] moov child: {:?} at pos {}, size={}, content_size={}",
-                header.box_type, pos, header.size, content_size
-            );
 
             match header.box_type {
                 BoxType::MVHD => {
-                    eprintln!("[MP4Reader] Parsing mvhd...");
                     let (_timescale, _duration) = parse_mvhd(reader)?;
-                    eprintln!("[MP4Reader] mvhd parsed successfully");
                 }
                 BoxType::TRAK => {
-                    eprintln!("[MP4Reader] Parsing trak...");
                     let trak_start = reader.stream_position()?;
                     Self::parse_trak(reader, content_size, tracks, sample_tables)?;
                     let trak_end = reader.stream_position()?;
                     let bytes_read = trak_end - trak_start;
-                    eprintln!(
-                        "[MP4Reader] trak parsed: expected {} bytes, read {} bytes",
-                        content_size, bytes_read
-                    );
 
                     if bytes_read != content_size {
                         let expected_pos = trak_start + content_size;
-                        eprintln!(
-                            "[MP4Reader] Position mismatch! Seeking from {} to {}",
-                            trak_end, expected_pos
-                        );
                         reader.seek(SeekFrom::Start(expected_pos))?;
                     }
                 }
                 _ => {
-                    eprintln!(
-                        "[MP4Reader] Skipping unknown box: {:?}, {} bytes",
-                        header.box_type, content_size
-                    );
                     skip_bytes(reader, content_size)?;
                 }
             }
         }
 
-        eprintln!("[MP4Reader] moov parsing complete");
         Ok(())
     }
 
@@ -239,13 +182,6 @@ impl<R: Read + Seek> Mp4Reader<R> {
 
             let current_pos = reader.stream_position()?;
             if current_pos > box_end {
-                eprintln!(
-                    "[MP4Reader] WARNING: Box {:?} over-read in trak! Expected end at {}, currently at {} (over by {} bytes)",
-                    header.box_type,
-                    box_end,
-                    current_pos,
-                    current_pos - box_end
-                );
                 reader.seek(std::io::SeekFrom::Start(box_end))?;
             } else if current_pos < box_end {
                 skip_bytes(reader, box_end - current_pos)?;
@@ -294,13 +230,6 @@ impl<R: Read + Seek> Mp4Reader<R> {
 
             let current_pos = reader.stream_position()?;
             if current_pos > box_end {
-                eprintln!(
-                    "[MP4Reader] WARNING: Box {:?} over-read in mdia! Expected end at {}, currently at {} (over by {} bytes)",
-                    header.box_type,
-                    box_end,
-                    current_pos,
-                    current_pos - box_end
-                );
                 reader.seek(std::io::SeekFrom::Start(box_end))?;
             } else if current_pos < box_end {
                 skip_bytes(reader, box_end - current_pos)?;
@@ -333,13 +262,6 @@ impl<R: Read + Seek> Mp4Reader<R> {
 
             let current_pos = reader.stream_position()?;
             if current_pos > box_end {
-                eprintln!(
-                    "[MP4Reader] WARNING: Box {:?} over-read in minf! Expected end at {}, currently at {} (over by {} bytes)",
-                    header.box_type,
-                    box_end,
-                    current_pos,
-                    current_pos - box_end
-                );
                 reader.seek(std::io::SeekFrom::Start(box_end))?;
             } else if current_pos < box_end {
                 skip_bytes(reader, box_end - current_pos)?;
@@ -393,14 +315,6 @@ impl<R: Read + Seek> Mp4Reader<R> {
 
             let current_pos = reader.stream_position()?;
             if current_pos > box_end {
-                eprintln!(
-                    "[MP4Reader] WARNING: Box {:?} over-read! Expected end at {}, currently at {} (over by {} bytes)",
-                    header.box_type,
-                    box_end,
-                    current_pos,
-                    current_pos - box_end
-                );
-
                 reader.seek(std::io::SeekFrom::Start(box_end))?;
             } else if current_pos < box_end {
                 skip_bytes(reader, box_end - current_pos)?;
@@ -463,7 +377,6 @@ impl<R: Read + Seek> Mp4Reader<R> {
                 let mut config = vec![0u8; content_size as usize];
                 reader.read_exact(&mut config)?;
                 track.codec_private_data = config;
-                eprintln!("[MP4Reader] Found avcC box: {} bytes", content_size);
             } else {
                 skip_bytes(reader, content_size)?;
             }

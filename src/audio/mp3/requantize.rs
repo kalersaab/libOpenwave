@@ -49,7 +49,6 @@ pub fn requantize(
                 }
             }
         } else {
-
             let mut sfb = 0;
             let mut next_sfb = SCALE_FACTOR_BAND_INDICES[header.sample_rate_table].1[sfb + 1] * 3;
             let mut window_len = SCALE_FACTOR_BAND_INDICES[header.sample_rate_table].1[sfb + 1]
@@ -81,7 +80,6 @@ pub fn requantize(
             }
         }
     } else {
-
         let mut sfb = 0;
         let mut next_sfb = SCALE_FACTOR_BAND_INDICES[header.sample_rate_table].0[sfb + 1];
 
@@ -96,7 +94,6 @@ pub fn requantize(
         }
     }
 }
-
 
 fn requantize_long(
     side_info: &GranuleChannelSideInfo,
@@ -125,7 +122,6 @@ fn requantize_long(
 
     main_data.samples[pos] = (tmp1 * tmp2 * f64::from(tmp3)) as f32;
 }
-
 
 fn requantize_short(
     side_info: &GranuleChannelSideInfo,

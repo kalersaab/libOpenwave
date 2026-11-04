@@ -1,47 +1,26 @@
-
-
-
 pub const MAX_CHANNELS: usize = 2;
-
-
-
 
 pub(crate) const MAX_GRANULES: usize = 2;
 
-
-
-
 #[derive(Debug, Clone)]
 pub struct FrameHeader {
-
     pub version: MpegVersion,
-
-
-
 
     pub layer: MpegLayer,
 
-
     pub crc: bool,
-
 
     pub bitrate: BitRate,
 
-
     pub sample_rate: SampleRate,
-
 
     pub padding: bool,
 
-
     pub channels: Channels,
-
 
     pub copyright: bool,
 
-
     pub original: bool,
-
 
     pub emphasis: Emphasis,
 
@@ -83,49 +62,33 @@ impl FrameHeader {
     }
 }
 
-
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 #[allow(clippy::enum_variant_names)]
 pub enum MpegVersion {
-
     Mpeg1,
 
-
     Mpeg2,
-
 
     Mpeg2_5,
 }
 
-
-
-
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 #[allow(clippy::enum_variant_names)]
 pub enum MpegLayer {
-
     Layer1,
 
-
     Layer2,
-
 
     Layer3,
 }
 
-
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Channels {
-
     Mono,
-
 
     DualMono,
 
-
     Stereo,
-
-
 
     JointStereo {
         intensity_stereo: bool,
@@ -134,7 +97,6 @@ pub enum Channels {
 }
 
 impl Channels {
-
     pub fn num_channels(self) -> usize {
         match self {
             Channels::Mono => 1,
@@ -142,9 +104,6 @@ impl Channels {
         }
     }
 }
-
-
-
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum BitRate {
@@ -169,7 +128,6 @@ pub enum BitRate {
 }
 
 impl BitRate {
-
     pub fn bps(self) -> u32 {
         match self {
             BitRate::Kbps8 => 8_000,
@@ -194,7 +152,6 @@ impl BitRate {
     }
 }
 
-
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum SampleRate {
     Hz8000,
@@ -209,7 +166,6 @@ pub enum SampleRate {
 }
 
 impl SampleRate {
-
     pub fn hz(self) -> u32 {
         match self {
             SampleRate::Hz8000 => 8_000,
@@ -225,14 +181,12 @@ impl SampleRate {
     }
 }
 
-
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Emphasis {
     None,
     FiftyFifteen,
     CcitJ17,
 }
-
 
 pub struct DecoderState {
     pub frame_buffer: [u8; 4096],

@@ -1,6 +1,4 @@
-
 pub const SCALE_FACTOR_BAND_INDICES: [([u32; 23], [u32; 14]); 9] = [
-
     (
         [
             0, 4, 8, 12, 16, 20, 24, 30, 36, 44, 52, 62, 74, 90, 110, 134, 162, 196, 238, 288, 342,
@@ -22,7 +20,6 @@ pub const SCALE_FACTOR_BAND_INDICES: [([u32; 23], [u32; 14]); 9] = [
         ],
         [0, 4, 8, 12, 16, 22, 30, 42, 58, 78, 104, 138, 180, 192],
     ),
-
     (
         [
             0, 4, 8, 12, 16, 20, 24, 30, 36, 44, 52, 62, 74, 90, 110, 134, 162, 196, 238, 288, 342,
@@ -44,7 +41,6 @@ pub const SCALE_FACTOR_BAND_INDICES: [([u32; 23], [u32; 14]); 9] = [
         ],
         [0, 4, 8, 12, 16, 22, 30, 42, 58, 78, 104, 138, 180, 192],
     ),
-
     (
         [
             0, 6, 12, 18, 24, 30, 36, 44, 54, 66, 80, 96, 116, 140, 168, 200, 238, 284, 336, 396,
@@ -107,19 +103,16 @@ pub struct HuffmanTable {
 }
 
 pub const HUFFMAN_TABLES: [HuffmanTable; 34] = [
-
     HuffmanTable {
         data: &[],
         linbits: 0,
         quads: false,
     },
-
     HuffmanTable {
         data: &[0x0201, 0x0000, 0x0201, 0x0010, 0x0201, 0x0001, 0x0011],
         linbits: 0,
         quads: false,
     },
-
     HuffmanTable {
         data: &[
             0x0201, 0x0000, 0x0401, 0x0201, 0x0010, 0x0001, 0x0201, 0x0011, 0x0401, 0x0201, 0x0020,
@@ -128,7 +121,6 @@ pub const HUFFMAN_TABLES: [HuffmanTable; 34] = [
         linbits: 0,
         quads: false,
     },
-
     HuffmanTable {
         data: &[
             0x0401, 0x0201, 0x0000, 0x0001, 0x0201, 0x0011, 0x0201, 0x0010, 0x0401, 0x0201, 0x0020,
@@ -137,13 +129,11 @@ pub const HUFFMAN_TABLES: [HuffmanTable; 34] = [
         linbits: 0,
         quads: false,
     },
-
     HuffmanTable {
         data: &[],
         linbits: 0,
         quads: false,
     },
-
     HuffmanTable {
         data: &[
             0x0201, 0x0000, 0x0401, 0x0201, 0x0010, 0x0001, 0x0201, 0x0011, 0x0801, 0x0401, 0x0201,
@@ -153,7 +143,6 @@ pub const HUFFMAN_TABLES: [HuffmanTable; 34] = [
         linbits: 0,
         quads: false,
     },
-
     HuffmanTable {
         data: &[
             0x0601, 0x0401, 0x0201, 0x0000, 0x0010, 0x0011, 0x0601, 0x0201, 0x0001, 0x0201, 0x0020,
@@ -163,7 +152,6 @@ pub const HUFFMAN_TABLES: [HuffmanTable; 34] = [
         linbits: 0,
         quads: false,
     },
-
     HuffmanTable {
         data: &[
             0x0201, 0x0000, 0x0401, 0x0201, 0x0010, 0x0001, 0x0801, 0x0201, 0x0011, 0x0401, 0x0201,
@@ -177,7 +165,6 @@ pub const HUFFMAN_TABLES: [HuffmanTable; 34] = [
         linbits: 0,
         quads: false,
     },
-
     HuffmanTable {
         data: &[
             0x0601, 0x0201, 0x0000, 0x0201, 0x0010, 0x0001, 0x0201, 0x0011, 0x0401, 0x0201, 0x0021,
@@ -191,7 +178,6 @@ pub const HUFFMAN_TABLES: [HuffmanTable; 34] = [
         linbits: 0,
         quads: false,
     },
-
     HuffmanTable {
         data: &[
             0x0801, 0x0401, 0x0201, 0x0000, 0x0010, 0x0201, 0x0001, 0x0011, 0x0a01, 0x0401, 0x0201,
@@ -205,7 +191,6 @@ pub const HUFFMAN_TABLES: [HuffmanTable; 34] = [
         linbits: 0,
         quads: false,
     },
-
     HuffmanTable {
         data: &[
             0x0201, 0x0000, 0x0401, 0x0201, 0x0010, 0x0001, 0x0a01, 0x0201, 0x0011, 0x0401, 0x0201,
@@ -224,7 +209,6 @@ pub const HUFFMAN_TABLES: [HuffmanTable; 34] = [
         linbits: 0,
         quads: false,
     },
-
     HuffmanTable {
         data: &[
             0x0601, 0x0201, 0x0000, 0x0201, 0x0010, 0x0001, 0x0801, 0x0201, 0x0011, 0x0401, 0x0201,
@@ -243,7 +227,6 @@ pub const HUFFMAN_TABLES: [HuffmanTable; 34] = [
         linbits: 0,
         quads: false,
     },
-
     HuffmanTable {
         data: &[
             0x0c01, 0x0401, 0x0201, 0x0010, 0x0001, 0x0201, 0x0011, 0x0201, 0x0000, 0x0201, 0x0020,
@@ -262,7 +245,6 @@ pub const HUFFMAN_TABLES: [HuffmanTable; 34] = [
         linbits: 0,
         quads: false,
     },
-
     HuffmanTable {
         data: &[
             0x0201, 0x0000, 0x0601, 0x0201, 0x0010, 0x0201, 0x0001, 0x0011, 0x1c01, 0x0801, 0x0401,
@@ -316,13 +298,11 @@ pub const HUFFMAN_TABLES: [HuffmanTable; 34] = [
         linbits: 0,
         quads: false,
     },
-
     HuffmanTable {
         data: &[],
         linbits: 0,
         quads: false,
     },
-
     HuffmanTable {
         data: &[
             0x1001, 0x0601, 0x0201, 0x0000, 0x0201, 0x0010, 0x0001, 0x0201, 0x0011, 0x0401, 0x0201,
@@ -376,103 +356,86 @@ pub const HUFFMAN_TABLES: [HuffmanTable; 34] = [
         linbits: 0,
         quads: false,
     },
-
     HuffmanTable {
         data: &HUFFMAN_TABLES_LIN_1,
         linbits: 1,
         quads: false,
     },
-
     HuffmanTable {
         data: &HUFFMAN_TABLES_LIN_1,
         linbits: 2,
         quads: false,
     },
-
     HuffmanTable {
         data: &HUFFMAN_TABLES_LIN_1,
         linbits: 3,
         quads: false,
     },
-
     HuffmanTable {
         data: &HUFFMAN_TABLES_LIN_1,
         linbits: 4,
         quads: false,
     },
-
     HuffmanTable {
         data: &HUFFMAN_TABLES_LIN_1,
         linbits: 6,
         quads: false,
     },
-
     HuffmanTable {
         data: &HUFFMAN_TABLES_LIN_1,
         linbits: 8,
         quads: false,
     },
-
     HuffmanTable {
         data: &HUFFMAN_TABLES_LIN_1,
         linbits: 10,
         quads: false,
     },
-
     HuffmanTable {
         data: &HUFFMAN_TABLES_LIN_1,
         linbits: 13,
         quads: false,
     },
-
     HuffmanTable {
         data: &HUFFMAN_TABLES_LIN_2,
         linbits: 4,
         quads: false,
     },
-
     HuffmanTable {
         data: &HUFFMAN_TABLES_LIN_2,
         linbits: 5,
         quads: false,
     },
-
     HuffmanTable {
         data: &HUFFMAN_TABLES_LIN_2,
         linbits: 6,
         quads: false,
     },
-
     HuffmanTable {
         data: &HUFFMAN_TABLES_LIN_2,
         linbits: 7,
         quads: false,
     },
-
     HuffmanTable {
         data: &HUFFMAN_TABLES_LIN_2,
         linbits: 8,
         quads: false,
     },
-
     HuffmanTable {
         data: &HUFFMAN_TABLES_LIN_2,
         linbits: 9,
         quads: false,
     },
-
     HuffmanTable {
         data: &HUFFMAN_TABLES_LIN_2,
         linbits: 11,
         quads: false,
     },
-
     HuffmanTable {
         data: &HUFFMAN_TABLES_LIN_2,
         linbits: 13,
         quads: false,
     },
-
     HuffmanTable {
         data: &[
             0x0201, 0x0000, 0x0801, 0x0401, 0x0201, 0x0008, 0x0004, 0x0201, 0x0001, 0x0002, 0x0801,
@@ -482,9 +445,7 @@ pub const HUFFMAN_TABLES: [HuffmanTable; 34] = [
         linbits: 0,
         quads: true,
     },
-
     HuffmanTable {
-
         data: &[
             0x1001, 0x0801, 0x0401, 0x0201, 0x0000, 0x0001, 0x0201, 0x0002, 0x0003, 0x0401, 0x0201,
             0x0004, 0x0005, 0x0201, 0x0006, 0x0007, 0x0801, 0x0401, 0x0201, 0x0008, 0x0009, 0x0201,
@@ -3257,10 +3218,6 @@ pub const SBS_N_WIN: [[f32; 32]; 64] = [
     ],
 ];
 
-
-
-
-
 #[allow(clippy::unreadable_literal)]
 pub const INTENSITY_STEREO_RATIOS: [[f32; 2]; 6] = [
     [0.0, 1.0],
@@ -3270,8 +3227,6 @@ pub const INTENSITY_STEREO_RATIOS: [[f32; 2]; 6] = [
     [0.6339746, 0.36602542],
     [0.7886751, 0.21132487],
 ];
-
-
 
 #[allow(clippy::unreadable_literal)]
 pub const LFS_INTENSITY_STEREO_RATIOS: [f32; 33] = [

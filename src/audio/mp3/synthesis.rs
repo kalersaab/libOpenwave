@@ -11,7 +11,6 @@ pub fn antialias(side_info: &GranuleChannelSideInfo, samples: &mut [f32; 576]) {
     ];
 
     let sblim = if side_info.block_type == BlockType::Short {
-
         return;
     } else if side_info.block_type == BlockType::Mixed {
         2

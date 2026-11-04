@@ -79,12 +79,10 @@ pub fn decode_p_slice_mb_type(
 ) -> Result<Option<MacroblockType>, H264DecodeError> {
     let b0 = engine.decode_decision(&mut contexts.states[14])?;
     if b0 == 0 {
-
         let b1 = engine.decode_decision(&mut contexts.states[15])?;
         if b1 == 0 {
             let b2 = engine.decode_decision(&mut contexts.states[16])?;
             if b2 == 0 {
-
                 Ok(None)
             } else {
                 eprintln!("[decode_p_slice_mb_type] P_8x8 (b0=0, b1=0, b2=1)");
@@ -101,7 +99,6 @@ pub fn decode_p_slice_mb_type(
             }
         }
     } else {
-
         eprintln!("[decode_p_slice_mb_type] Intra in P-slice (b0=1)");
         if engine.decode_decision(&mut contexts.states[17])? == 0 {
             return Ok(Some(MacroblockType::Intra4x4));

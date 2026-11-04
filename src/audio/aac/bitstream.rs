@@ -50,6 +50,27 @@ impl<'a> BitReader<'a> {
         Ok(value)
     }
 
+    pub fn ignore_bits(&mut self, n: usize) -> io::Result<()> {
+        let mut remaining = n;
+        while remaining > 0 {
+            let avail = 8 - self.bit_pos as usize;
+            let take = avail.min(remaining);
+            self.bit_pos += take as u8;
+            remaining -= take;
+            if self.bit_pos == 8 {
+                self.bit_pos = 0;
+                self.byte_pos += 1;
+            }
+        }
+        if self.byte_pos > self.data.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "BitReader: EOF",
+            ));
+        }
+        Ok(())
+    }
+
     pub fn byte_align(&mut self) {
         if self.bit_pos != 0 {
             self.bit_pos = 0;
