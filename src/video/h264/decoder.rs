@@ -1581,7 +1581,6 @@ fn reconstruct_slice_cabac(
         let mb_x = macroblock_address % sps.pic_width_in_mbs;
         let mb_y = macroblock_address / sps.pic_width_in_mbs;
 
-
         eprintln!(
             "[CABAC STATE] mb_addr={} bits={} range={} offset={}",
             macroblock_address, engine.bits_consumed, engine.range, engine.offset
@@ -2123,7 +2122,6 @@ fn decode_and_apply_inter_residual_cabac(
     let qp_y_u8 = u8::try_from(qp_y).map_err(|_| H264DecodeError::InvalidStream)?;
     let qp_c = chroma_qp_from_luma(qp_y, pps.chroma_qp_index_offset);
 
-
     for b_idx in 0..16usize {
         let b_8x8 = b_idx / 4;
         let b_4x4 = b_idx % 4;
@@ -2179,7 +2177,6 @@ fn decode_and_apply_inter_residual_cabac(
             }
         }
     }
-
 
     let coded_chroma_pattern = (cbp >> 4) & 0x3;
     let (chroma_dc_cb, chroma_dc_cr) = decode_chroma_dc_cabac(
@@ -2401,7 +2398,6 @@ fn decode_chroma_dc_cabac(
         return Ok(([0i32; 4], [0i32; 4]));
     }
 
-
     let cond_a = if mb_x > 0 {
         ((cbp_cache[mb_y as usize * pic_width_in_mbs as usize + mb_x as usize - 1] >> 4) & 0x3) > 0
     } else {
@@ -2414,11 +2410,9 @@ fn decode_chroma_dc_cabac(
         false
     };
 
-
     let (block_cb, nnz_cb) =
         decode_cabac_residual_block(engine, contexts, ResidualCategory::ChromaDc, cond_a, cond_b)?;
     let dc_cb = [block_cb[0], block_cb[1], block_cb[2], block_cb[3]];
-
 
     let (block_cr, nnz_cr) =
         decode_cabac_residual_block(engine, contexts, ResidualCategory::ChromaDc, cond_a, cond_b)?;
@@ -2430,8 +2424,6 @@ fn decode_chroma_dc_cabac(
 
     Ok((dc_cb, dc_cr))
 }
-
-
 
 fn decode_chroma_ac_cabac(
     engine: &mut CabacEngine<'_>,

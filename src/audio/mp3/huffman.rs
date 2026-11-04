@@ -19,7 +19,6 @@ pub fn read_huffman(
 
     let mut bits_read = 0;
 
-
     let (region1_start, region2_start) =
         if side_info.block_type == BlockType::Short || side_info.block_type == BlockType::Mixed {
             (36, 576)
@@ -31,7 +30,6 @@ pub fn read_huffman(
                     [side_info.region0_count as usize + side_info.region1_count as usize + 2],
             )
         };
-
 
     let mut is_pos: usize = 0;
     let is_len = side_info.big_values as usize * 2;
@@ -54,7 +52,6 @@ pub fn read_huffman(
         samples[is_pos] = state.y as f32;
         is_pos += 1;
     }
-
 
     let table_num = if side_info.count1table_select { 33 } else { 32 };
     let huffman_table = &HUFFMAN_TABLES[table_num];

@@ -48,7 +48,6 @@ pub fn decode_cabac_residual_block(
     let last_base = LAST_COEFF_FLAG_OFFSET[cat];
     let abs_base = COEFF_ABS_LEVEL_M1_OFFSET[cat];
 
-
     let mut coeff_indices = Vec::with_capacity(max_coeff);
     let mut reached_end = true;
 

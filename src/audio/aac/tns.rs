@@ -1,146 +1,169 @@
+// Symphonia AAC-LC decoder port.
+// Copyright (c) 2019-2026 The Project Symphonia Developers.
+// This file is licensed under the Mozilla Public License, v. 2.0.
+
 use crate::audio::aac::bitstream::BitReader;
+use crate::audio::aac::common::*;
+use crate::audio::aac::ics::IcsInfo;
+use std::f32::consts;
 use std::io;
 
-#[derive(Debug, Clone)]
-pub struct TnsData {
-    pub n_filt: [u8; 8],
-    pub coef_res: [bool; 8],
-    pub length: [[u8; 4]; 8],
-    pub order: [[u8; 4]; 8],
-    pub direction: [[bool; 4]; 8],
-    pub coef_compress: [[bool; 4]; 8],
-    pub coef: [[[f32; 20]; 4]; 8],
+const TNS_MAX_ORDER: usize = 20;
+const TNS_MAX_LONG_BANDS: [usize; 12] = [31, 31, 34, 40, 42, 51, 46, 46, 42, 42, 42, 39];
+const TNS_MAX_SHORT_BANDS: [usize; 12] = [9, 9, 10, 14, 14, 14, 14, 14, 14, 14, 14, 14];
+
+#[derive(Copy, Clone)]
+struct TnsCoeffs {
+    length: usize,
+    order: usize,
+    direction: bool,
+    coef: [f32; TNS_MAX_ORDER + 1],
 }
 
-impl TnsData {
-    pub fn decode(br: &mut BitReader, is_eight_short: bool) -> io::Result<Self> {
-        let num_windows = if is_eight_short { 8 } else { 1 };
-
-        let mut tns_data = TnsData {
-            n_filt: [0; 8],
-            coef_res: [false; 8],
-            length: [[0; 4]; 8],
-            order: [[0; 4]; 8],
-            direction: [[false; 4]; 8],
-            coef_compress: [[false; 4]; 8],
-            coef: [[[0.0; 20]; 4]; 8],
-        };
-
-        for w in 0..num_windows {
-            let n_filt = br.read_bits(if is_eight_short { 1 } else { 2 })? as u8;
-            tns_data.n_filt[w] = n_filt;
-
-            if n_filt > 0 {
-                tns_data.coef_res[w] = br.read_bit()?;
-            }
-
-            for f in 0..n_filt as usize {
-                let length = br.read_bits(if is_eight_short { 4 } else { 6 })? as u8;
-                tns_data.length[w][f] = length;
-
-                let order = br.read_bits(if is_eight_short { 3 } else { 5 })? as u8;
-                tns_data.order[w][f] = order;
-
-                if order > 0 {
-                    tns_data.direction[w][f] = br.read_bit()?;
-                    tns_data.coef_compress[w][f] = br.read_bit()?;
-
-                    let coef_bits = if tns_data.coef_res[w] { 4 } else { 3 };
-                    let coef_bits = if tns_data.coef_compress[w][f] {
-                        coef_bits - 1
-                    } else {
-                        coef_bits
-                    };
-
-                    for i in 0..order as usize {
-                        let coef_raw = br.read_bits(coef_bits)? as i8;
-                        tns_data.coef[w][f][i] =
-                            Self::dequantize_coef(coef_raw, coef_bits, tns_data.coef_res[w]);
-                    }
-                }
-            }
-        }
-
-        Ok(tns_data)
-    }
-
-    fn dequantize_coef(raw: i8, bits: u8, coef_res: bool) -> f32 {
-        let max_val = (1 << bits) - 1;
-        let signed = if raw > (max_val / 2) {
-            raw - max_val - 1
-        } else {
-            raw
-        };
-
-        if coef_res {
-            signed as f32 / 8.0
-        } else {
-            signed as f32 / 4.0
+impl TnsCoeffs {
+    fn new() -> Self {
+        Self {
+            length: 0,
+            order: 0,
+            direction: false,
+            coef: [0.0; TNS_MAX_ORDER + 1],
         }
     }
 
-    pub fn apply(&self, spectral: &mut [f32], window: usize, max_sfb: usize) {
-        if window >= 8 {
-            return;
+    fn read(
+        &mut self,
+        br: &mut BitReader,
+        long_win: bool,
+        coef_res: bool,
+        max_order: usize,
+    ) -> io::Result<()> {
+        self.length = br.read_bits(if long_win { 6 } else { 4 })? as usize;
+        self.order = br.read_bits(if long_win { 5 } else { 3 })? as usize;
+
+        if self.order > max_order {
+            return Err(decode_error("aac: invalid tns order"));
         }
 
-        for f in 0..self.n_filt[window] as usize {
-            let order = self.order[window][f] as usize;
-            if order == 0 {
-                continue;
+        if self.order > 0 {
+            self.direction = br.read_bit()?;
+            let coef_compress = br.read_bit()?;
+
+            let mut coef_res_bits = if coef_res { 4 } else { 3 };
+            if coef_compress {
+                coef_res_bits -= 1;
             }
 
-            let start = max_sfb.saturating_sub(self.length[window][f] as usize);
-            let end = max_sfb;
+            let sign_mask = 1 << (coef_res_bits - 1);
+            let neg_mask = !((1 << coef_res_bits) - 1);
+            let fac_base = if coef_res { 8.0 } else { 4.0 };
+            let iqfac = (fac_base - 0.5) / consts::FRAC_PI_2;
+            let iqfac_m = (fac_base + 0.5) / consts::FRAC_PI_2;
 
-            if self.direction[window][f] {
-                for i in (start..end).rev() {
-                    let mut sum = spectral[i];
-                    for k in 0..order.min(i - start) {
-                        sum -= self.coef[window][f][k] * spectral[i - k - 1];
-                    }
-                    spectral[i] = sum;
+            let mut tmp: [f32; TNS_MAX_ORDER] = [0.0; TNS_MAX_ORDER];
+
+            for el in tmp[..self.order].iter_mut() {
+                let val = br.read_bits(coef_res_bits)? as u8;
+                let c = f32::from(if (val & sign_mask) != 0 {
+                    (val | neg_mask) as i8
+                } else {
+                    val as i8
+                });
+                *el = (if c >= 0.0 { c / iqfac } else { c / iqfac_m }).sin();
+            }
+
+            let mut b: [f32; TNS_MAX_ORDER + 1] = [0.0; TNS_MAX_ORDER + 1];
+
+            for m in 1..=self.order {
+                for i in 1..m {
+                    b[i] = self.coef[i - 1] + tmp[m - 1] * self.coef[m - i - 1];
                 }
+                self.coef[..(m - 1)].copy_from_slice(&b[1..m]);
+                self.coef[m - 1] = tmp[m - 1];
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Copy, Clone)]
+pub struct Tns {
+    n_filt: [usize; MAX_WINDOWS],
+    coeffs: [[TnsCoeffs; 4]; MAX_WINDOWS],
+}
+
+impl Tns {
+    pub fn read(br: &mut BitReader, info: &IcsInfo) -> io::Result<Option<Self>> {
+        let tns_data_present = br.read_bit()?;
+        if !tns_data_present {
+            return Ok(None);
+        }
+
+        let max_order = if !info.long_win { 7 } else { 12 };
+
+        let mut n_filt: [usize; MAX_WINDOWS] = [0; MAX_WINDOWS];
+        let mut coeffs: [[TnsCoeffs; 4]; MAX_WINDOWS] = [[TnsCoeffs::new(); 4]; MAX_WINDOWS];
+
+        for w in 0..info.num_windows {
+            n_filt[w] = br.read_bits(if info.long_win { 2 } else { 1 })? as usize;
+            let coef_res = if n_filt[w] != 0 {
+                br.read_bit()?
             } else {
-                for i in start..end {
-                    let mut sum = spectral[i];
-                    for k in 0..order.min(i - start) {
-                        sum -= self.coef[window][f][k] * spectral[i - k - 1];
+                false
+            };
+
+            for filt in 0..n_filt[w] {
+                coeffs[w][filt].read(br, info.long_win, coef_res, max_order)?;
+            }
+        }
+
+        Ok(Some(Self { n_filt, coeffs }))
+    }
+
+    pub fn synth(
+        &self,
+        info: &IcsInfo,
+        bands: &[usize],
+        rate_idx: usize,
+        coeffs: &mut [f32; 1024],
+    ) {
+        let tns_max_bands = (if info.long_win {
+            TNS_MAX_LONG_BANDS[rate_idx]
+        } else {
+            TNS_MAX_SHORT_BANDS[rate_idx]
+        })
+        .min(info.max_sfb);
+
+        for w in 0..info.num_windows {
+            let mut bottom = bands.len() - 1;
+
+            for f in 0..self.n_filt[w] {
+                let top = bottom;
+                bottom = top.saturating_sub(self.coeffs[w][f].length);
+                let order = self.coeffs[w][f].order;
+
+                if order == 0 {
+                    continue;
+                }
+
+                let start = w * 128 + bands[bottom.min(tns_max_bands)];
+                let end = w * 128 + bands[top.min(tns_max_bands)];
+                let lpc = &self.coeffs[w][f].coef;
+
+                if !self.coeffs[w][f].direction {
+                    for (m, i) in (start..end).enumerate() {
+                        for j in 0..order.min(m) {
+                            coeffs[i] -= coeffs[i - j - 1] * lpc[j];
+                        }
                     }
-                    spectral[i] = sum;
+                } else {
+                    for (m, i) in (start..end).rev().enumerate() {
+                        for j in 0..order.min(m) {
+                            coeffs[i] -= coeffs[i + j + 1] * lpc[j];
+                        }
+                    }
                 }
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn dequantizes_4bit_coef() {
-        let coef = TnsData::dequantize_coef(7, 4, true);
-        assert!((coef - 0.875).abs() < 0.001);
-    }
-
-    #[test]
-    fn applies_tns_identity() {
-        let tns = TnsData {
-            n_filt: [0; 8],
-            coef_res: [false; 8],
-            length: [[0; 4]; 8],
-            order: [[0; 4]; 8],
-            direction: [[false; 4]; 8],
-            coef_compress: [[false; 4]; 8],
-            coef: [[[0.0; 20]; 4]; 8],
-        };
-
-        let mut spectral = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        let original = spectral.clone();
-
-        tns.apply(&mut spectral, 0, 5);
-
-        assert_eq!(spectral, original);
     }
 }

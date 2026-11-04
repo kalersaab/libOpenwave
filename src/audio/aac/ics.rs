@@ -1,342 +1,374 @@
+// Symphonia AAC-LC decoder port.
+// Copyright (c) 2019-2026 The Project Symphonia Developers.
+// This file is licensed under the Mozilla Public License, v. 2.0.
+
 use crate::audio::aac::bitstream::BitReader;
-use crate::audio::aac::huffman;
+use crate::audio::aac::codebooks;
+use crate::audio::aac::common::*;
+use crate::audio::aac::dsp;
+use crate::audio::aac::pulse::Pulse;
+use crate::audio::aac::tns::Tns;
 use std::io;
+use std::sync::LazyLock;
 
-pub const MAX_WINDOWS: usize = 8;
-pub const MAX_SCALE_FACTOR_BANDS: usize = 64;
+const ZERO_HCB: u8 = 0;
+const RESERVED_HCB: u8 = 12;
+const NOISE_HCB: u8 = 13;
+const INTENSITY_HCB2: u8 = 14;
+const INTENSITY_HCB: u8 = 15;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WindowSequence {
-    OnlyLong,
-    LongStart,
-    EightShort,
-    LongStop,
-}
+const INTENSITY_SCALE_MIN: i16 = -155;
+const NORMAL_SCALE_MIN: i16 = -100;
 
-impl WindowSequence {
-    pub fn from_u8(value: u8) -> io::Result<Self> {
-        match value {
-            0 => Ok(WindowSequence::OnlyLong),
-            1 => Ok(WindowSequence::LongStart),
-            2 => Ok(WindowSequence::EightShort),
-            3 => Ok(WindowSequence::LongStop),
-            _ => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Invalid window sequence",
-            )),
-        }
+static NORMAL_SCF_TABLE: LazyLock<[f32; 256]> = LazyLock::new(|| {
+    let mut table = [0.0f32; 256];
+    for (i, v) in table.iter_mut().enumerate() {
+        *v = 2.0f32.powf(0.25 * f32::from(i as i16 - 56 + NORMAL_SCALE_MIN));
     }
+    table
+});
 
-    pub fn num_windows(self) -> usize {
-        match self {
-            WindowSequence::EightShort => 8,
-            _ => 1,
-        }
+static INTENSITY_SCF_TABLE: LazyLock<[f32; 256]> = LazyLock::new(|| {
+    let mut table = [0.0f32; 256];
+    for (i, v) in table.iter_mut().enumerate() {
+        *v = 0.5f32.powf(0.25 * f32::from(i as i16 + INTENSITY_SCALE_MIN));
     }
+    table
+});
 
-    pub fn is_long(self) -> bool {
-        !matches!(self, WindowSequence::EightShort)
-    }
-}
-
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct IcsInfo {
-    pub window_sequence: WindowSequence,
+    pub window_sequence: u8,
+    pub prev_window_sequence: u8,
     pub window_shape: bool,
-    pub max_sfb: u8,
-    pub scale_factor_grouping: u8,
-    pub predictor_data_present: bool,
+    pub prev_window_shape: bool,
+    pub scale_factor_grouping: [bool; MAX_WINDOWS],
+    pub group_start: [usize; MAX_WINDOWS],
+    pub window_groups: usize,
+    pub num_windows: usize,
+    pub max_sfb: usize,
+    pub long_win: bool,
 }
 
 impl IcsInfo {
-    pub fn decode(br: &mut BitReader) -> io::Result<Self> {
-        br.read_bit()?;
-
-        let window_sequence = WindowSequence::from_u8(br.read_bits(2)? as u8)?;
-        let window_shape = br.read_bit()?;
-
-        let (max_sfb, scale_factor_grouping) = if window_sequence == WindowSequence::EightShort {
-            let max_sfb = br.read_bits(4)? as u8;
-            let scale_factor_grouping = br.read_bits(7)? as u8;
-            (max_sfb, scale_factor_grouping)
-        } else {
-            let max_sfb = br.read_bits(6)? as u8;
-            (max_sfb, 0)
-        };
-
-        let predictor_data_present = br.read_bit()?;
-        if predictor_data_present {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "Predictor data not supported",
-            ));
+    fn new() -> Self {
+        Self {
+            window_sequence: 0,
+            prev_window_sequence: 0,
+            window_shape: false,
+            prev_window_shape: false,
+            scale_factor_grouping: [false; MAX_WINDOWS],
+            group_start: [0; MAX_WINDOWS],
+            num_windows: 0,
+            window_groups: 0,
+            max_sfb: 0,
+            long_win: true,
         }
-
-        Ok(IcsInfo {
-            window_sequence,
-            window_shape,
-            max_sfb,
-            scale_factor_grouping,
-            predictor_data_present,
-        })
     }
 
-    pub fn num_window_groups(&self) -> usize {
-        if self.window_sequence == WindowSequence::EightShort {
-            let mut groups = 1;
-            let mut mask = self.scale_factor_grouping;
-            for _ in 0..7 {
-                if (mask & 0x40) == 0 {
-                    groups += 1;
+    pub fn decode(&mut self, br: &mut BitReader) -> io::Result<()> {
+        self.prev_window_sequence = self.window_sequence;
+        self.prev_window_shape = self.window_shape;
+
+        if br.read_bit()? {
+            return Err(decode_error("aac: ics reserved bit set"));
+        }
+
+        self.window_sequence = br.read_bits(2)? as u8;
+        self.window_shape = br.read_bit()?;
+        self.window_groups = 1;
+
+        if self.window_sequence == EIGHT_SHORT_SEQUENCE {
+            self.long_win = false;
+            self.num_windows = 8;
+            self.max_sfb = br.read_bits(4)? as usize;
+
+            for i in 0..MAX_WINDOWS - 1 {
+                self.scale_factor_grouping[i] = br.read_bit()?;
+                if !self.scale_factor_grouping[i] {
+                    self.group_start[self.window_groups] = i + 1;
+                    self.window_groups += 1;
                 }
-                mask <<= 1;
             }
-            groups
         } else {
-            1
+            self.long_win = true;
+            self.num_windows = 1;
+            self.max_sfb = br.read_bits(6)? as usize;
+
+            if br.read_bit()? {
+                return Err(unsupported_error("aac: predictor data"));
+            }
         }
+        Ok(())
     }
 
-    pub fn window_group_length(&self, g: usize) -> usize {
-        if self.window_sequence != WindowSequence::EightShort {
-            return 1;
+    pub fn copy_from_common(&mut self, other: &IcsInfo) {
+        let prev_window_sequence = self.window_sequence;
+        let prev_window_shape = self.window_shape;
+        *self = other.clone();
+        self.prev_window_sequence = prev_window_sequence;
+        self.prev_window_shape = prev_window_shape;
+    }
+
+    fn get_group_start(&self, g: usize) -> usize {
+        if g == 0 {
+            0
+        } else if g >= self.window_groups {
+            if self.long_win { 1 } else { 8 }
+        } else {
+            self.group_start[g]
         }
-
-        let mut len = 1;
-        let mut win = g;
-        let mut mask = self.scale_factor_grouping >> (6 - g);
-
-        while win < 7 && (mask & 1) != 0 {
-            len += 1;
-            win += 1;
-            mask >>= 1;
-        }
-
-        len
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Section {
-    pub codebook: u8,
-    pub start: usize,
-    pub end: usize,
+#[derive(Clone)]
+pub struct Ics {
+    global_gain: u8,
+    pub info: IcsInfo,
+    pulse: Option<Pulse>,
+    tns: Option<Tns>,
+    sect_cb: [[u8; MAX_SFBS]; MAX_WINDOWS],
+    sect_len: [[usize; MAX_SFBS]; MAX_WINDOWS],
+    sfb_cb: [[u8; MAX_SFBS]; MAX_WINDOWS],
+    num_sec: [usize; MAX_WINDOWS],
+    pub scales: [[f32; MAX_SFBS]; MAX_WINDOWS],
+    sbinfo: GASubbandInfo,
+    pub coeffs: [f32; 1024],
+    delay: [f32; 1024],
 }
 
-#[derive(Debug)]
-pub struct IndividualChannelStream {
-    pub ics_info: IcsInfo,
-    pub global_gain: u8,
-    pub pulse_data_present: bool,
-    pub tns_data_present: bool,
-    pub gain_control_present: bool,
-    pub scale_factors: Vec<i16>,
-    pub sections: Vec<Section>,
-    pub spectral_data: Vec<f32>,
-}
-
-impl IndividualChannelStream {
-    pub fn decode(br: &mut BitReader, common_window: bool) -> io::Result<Self> {
-        let global_gain = br.read_bits(8)? as u8;
-
-        let ics_info = if !common_window {
-            IcsInfo::decode(br)?
-        } else {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "Common window not yet supported",
-            ));
-        };
-
-        let (sections, scale_factors) = Self::decode_section_data(br, &ics_info)?;
-
-        let pulse_data_present = br.read_bit()?;
-        if pulse_data_present {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "Pulse data not supported",
-            ));
+impl Ics {
+    pub fn new(sbinfo: GASubbandInfo) -> Self {
+        Self {
+            global_gain: 0,
+            info: IcsInfo::new(),
+            pulse: None,
+            tns: None,
+            sect_cb: [[0; MAX_SFBS]; MAX_WINDOWS],
+            sect_len: [[0; MAX_SFBS]; MAX_WINDOWS],
+            sfb_cb: [[0; MAX_SFBS]; MAX_WINDOWS],
+            scales: [[0.0; MAX_SFBS]; MAX_WINDOWS],
+            num_sec: [0; MAX_WINDOWS],
+            sbinfo,
+            coeffs: [0.0; 1024],
+            delay: [0.0; 1024],
         }
-
-        let tns_data_present = br.read_bit()?;
-
-        let gain_control_present = br.read_bit()?;
-        if gain_control_present {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "Gain control not supported",
-            ));
-        }
-
-        let spectral_data = Self::decode_spectral_data(br, &sections, &scale_factors)?;
-
-        Ok(IndividualChannelStream {
-            ics_info,
-            global_gain,
-            pulse_data_present,
-            tns_data_present,
-            gain_control_present,
-            scale_factors,
-            sections,
-            spectral_data,
-        })
     }
 
-    fn decode_section_data(
-        br: &mut BitReader,
-        ics_info: &IcsInfo,
-    ) -> io::Result<(Vec<Section>, Vec<i16>)> {
-        let num_groups = ics_info.num_window_groups();
-        let sect_len_bits = if ics_info.window_sequence.is_long() {
-            5
-        } else {
-            3
-        };
+    pub fn reset(&mut self) {
+        self.info = IcsInfo::new();
+        self.delay = [0.0; 1024];
+    }
 
-        let mut sections = Vec::new();
-        let mut scale_factors = Vec::new();
+    fn decode_section_data(&mut self, br: &mut BitReader) -> io::Result<()> {
+        let sect_bits = if self.info.long_win { 5 } else { 3 };
+        let sect_esc_val = (1 << sect_bits) - 1;
 
-        for _g in 0..num_groups {
-            let mut sect_start = 0;
+        for g in 0..self.info.window_groups {
+            let mut k = 0;
+            let mut l = 0;
 
-            loop {
-                let sect_cb = br.read_bits(4)? as u8;
+            while k < self.info.max_sfb {
+                if l >= MAX_SFBS {
+                    return Err(decode_error("aac: too many sections"));
+                }
 
-                let mut sect_len = 0;
+                self.sect_cb[g][l] = br.read_bits(4)? as u8;
+                self.sect_len[g][l] = 0;
+
+                if self.sect_cb[g][l] == RESERVED_HCB {
+                    return Err(decode_error("aac: invalid band type"));
+                }
+
                 loop {
-                    let len_incr = br.read_bits(sect_len_bits)? as usize;
-                    sect_len += len_incr;
-                    if len_incr != (1 << sect_len_bits) - 1 {
+                    let sect_len_incr = br.read_bits(sect_bits)? as usize;
+                    self.sect_len[g][l] += sect_len_incr;
+                    if sect_len_incr < sect_esc_val {
                         break;
                     }
                 }
 
-                let sect_end = sect_start + sect_len;
-
-                if sect_cb != 0 {
-                    sections.push(Section {
-                        codebook: sect_cb,
-                        start: sect_start,
-                        end: sect_end,
-                    });
+                if k + self.sect_len[g][l] > self.info.max_sfb {
+                    return Err(decode_error("aac: invalid section length"));
                 }
 
-                sect_start = sect_end;
-                if sect_start >= ics_info.max_sfb as usize {
-                    break;
+                for sfb in k..k + self.sect_len[g][l] {
+                    self.sfb_cb[g][sfb] = self.sect_cb[g][l];
                 }
+
+                k += self.sect_len[g][l];
+                l += 1;
             }
+
+            self.num_sec[g] = l;
         }
+        Ok(())
+    }
 
-        let mut noise_pcm_flag = br.read_bit()?;
+    pub fn is_zero(&self, g: usize, sfb: usize) -> bool {
+        self.sfb_cb[g][sfb] == ZERO_HCB
+    }
 
-        for section in &sections {
-            if section.codebook < 11 {
-                for _ in section.start..section.end {
-                    let sf_delta = Self::decode_scale_factor(br)?;
-                    scale_factors.push(sf_delta);
-                }
-            } else if section.codebook >= 13 {
-                for _ in section.start..section.end {
+    pub fn is_intensity(&self, g: usize, sfb: usize) -> bool {
+        self.sfb_cb[g][sfb] == INTENSITY_HCB || self.sfb_cb[g][sfb] == INTENSITY_HCB2
+    }
+
+    pub fn is_noise(&self, g: usize, sfb: usize) -> bool {
+        self.sfb_cb[g][sfb] == NOISE_HCB
+    }
+
+    pub fn get_intensity_dir(&self, g: usize, sfb: usize) -> bool {
+        self.sfb_cb[g][sfb] == INTENSITY_HCB
+    }
+
+    pub fn decode_info(&mut self, br: &mut BitReader) -> io::Result<()> {
+        self.info.decode(br)?;
+        if self.info.max_sfb + 1 > self.get_bands().len() {
+            return Err(decode_error(
+                "aac: ics info max_sfb is too big for the bands size",
+            ));
+        }
+        Ok(())
+    }
+
+    fn decode_scale_factor_data(&mut self, br: &mut BitReader) -> io::Result<()> {
+        let mut noise_pcm_flag = true;
+        let mut scf_intensity = -INTENSITY_SCALE_MIN;
+        let mut scf_noise = i16::from(self.global_gain) - 90 - NORMAL_SCALE_MIN;
+        let mut scf_normal = i16::from(self.global_gain);
+
+        for g in 0..self.info.window_groups {
+            for sfb in 0..self.info.max_sfb {
+                self.scales[g][sfb] = if self.is_zero(g, sfb) {
+                    0.0
+                } else if self.is_intensity(g, sfb) {
+                    scf_intensity += codebooks::decode_scalefactor(br)?;
+                    if !(0..256).contains(&scf_intensity) {
+                        return Err(decode_error("aac: invalid intensity scale factor"));
+                    }
+                    INTENSITY_SCF_TABLE[scf_intensity as usize]
+                } else if self.is_noise(g, sfb) {
                     if noise_pcm_flag {
-                        let noise_val = br.read_bits(9)? as i16 - 256;
-                        scale_factors.push(noise_val);
+                        noise_pcm_flag = false;
+                        scf_noise += (br.read_bits(9)? as i16) - 256;
                     } else {
-                        let sf_delta = Self::decode_scale_factor(br)?;
-                        scale_factors.push(sf_delta);
+                        scf_noise += codebooks::decode_scalefactor(br)?;
                     }
-                    noise_pcm_flag = false;
-                }
-            }
-        }
-
-        Ok((sections, scale_factors))
-    }
-
-    fn decode_scale_factor(br: &mut BitReader) -> io::Result<i16> {
-        let mut value = 0i16;
-
-        loop {
-            let code = br.read_bits(2)? as u8;
-            match code {
-                0 => break,
-                1 => value += 1,
-                2 => value -= 1,
-                3 => value += 2,
-                _ => unreachable!(),
-            }
-        }
-
-        Ok(value)
-    }
-
-    fn decode_spectral_data(
-        br: &mut BitReader,
-        sections: &[Section],
-        scale_factors: &[i16],
-    ) -> io::Result<Vec<f32>> {
-        let mut spectral = vec![0.0f32; 1024];
-        let mut sf_idx = 0;
-
-        for section in sections {
-            let codebook = huffman::get_codebook(section.codebook)
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid codebook"))?;
-
-            for sfb in section.start..section.end {
-                let scale_factor = if sf_idx < scale_factors.len() {
-                    scale_factors[sf_idx]
+                    if !(0..256).contains(&scf_noise) {
+                        return Err(decode_error("aac: invalid noise scale factor"));
+                    }
+                    NORMAL_SCF_TABLE[scf_noise as usize]
                 } else {
-                    0
-                };
-                sf_idx += 1;
-
-                let sfb_width = 4;
-                let sfb_start = sfb * sfb_width;
-
-                for i in (0..sfb_width).step_by(2) {
-                    let (w, x) = codebook.decode(br)?;
-
-                    if sfb_start + i < spectral.len() {
-                        spectral[sfb_start + i] = w as f32 * (scale_factor as f32 * 0.25).exp2();
+                    scf_normal += codebooks::decode_scalefactor(br)?;
+                    if !(0..256).contains(&scf_normal) {
+                        return Err(decode_error("aac: invalid scale factor"));
                     }
-                    if sfb_start + i + 1 < spectral.len() {
-                        spectral[sfb_start + i + 1] =
-                            x as f32 * (scale_factor as f32 * 0.25).exp2();
+                    NORMAL_SCF_TABLE[scf_normal as usize]
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn get_bands(&self) -> &'static [usize] {
+        if self.info.long_win {
+            self.sbinfo.long_bands
+        } else {
+            self.sbinfo.short_bands
+        }
+    }
+
+    fn decode_spectrum(&mut self, br: &mut BitReader, lcg: &mut Lcg) -> io::Result<()> {
+        self.coeffs.fill(0.0);
+        let bands = self.get_bands();
+
+        for g in 0..self.info.window_groups {
+            let cur_w = self.info.get_group_start(g);
+            let next_w = self.info.get_group_start(g + 1);
+            for sfb in 0..self.info.max_sfb {
+                let start = bands[sfb];
+                let end = bands[sfb + 1];
+                let cb_idx = self.sfb_cb[g][sfb];
+                let scale = self.scales[g][sfb];
+
+                for w in cur_w..next_w {
+                    let dst = &mut self.coeffs[start + w * 128..end + w * 128];
+
+                    match cb_idx {
+                        ZERO_HCB | RESERVED_HCB | INTENSITY_HCB2 | INTENSITY_HCB => (),
+                        NOISE_HCB => decode_noise(lcg, scale, dst),
+                        1..=11 => codebooks::decode_band(br, cb_idx, scale, dst)?,
+                        _ => unreachable!(),
                     }
                 }
             }
         }
+        Ok(())
+    }
 
-        Ok(spectral)
+    pub fn decode(
+        &mut self,
+        br: &mut BitReader,
+        lcg: &mut Lcg,
+        common_window: bool,
+    ) -> io::Result<()> {
+        self.global_gain = br.read_bits(8)? as u8;
+
+        if !common_window {
+            self.decode_info(br)?;
+        }
+
+        self.decode_section_data(br)?;
+        self.decode_scale_factor_data(br)?;
+
+        self.pulse = Pulse::read(br)?;
+        if self.pulse.is_some() && !self.info.long_win {
+            return Err(decode_error("aac: pulse data in short window"));
+        }
+
+        self.tns = Tns::read(br, &self.info)?;
+
+        if br.read_bit()? {
+            return Err(unsupported_error("aac: gain control data"));
+        }
+
+        self.decode_spectrum(br, lcg)?;
+        Ok(())
+    }
+
+    pub fn synth_channel(&mut self, dsp: &mut dsp::Dsp, rate_idx: usize, dst: &mut [f32]) {
+        let bands = self.get_bands();
+
+        if let Some(pulse) = &self.pulse {
+            pulse.synth(bands, &self.scales, &mut self.coeffs);
+        }
+
+        if let Some(tns) = &self.tns {
+            tns.synth(&self.info, bands, rate_idx, &mut self.coeffs);
+        }
+
+        dsp.synth(
+            &self.coeffs,
+            &mut self.delay,
+            self.info.window_sequence,
+            self.info.window_shape,
+            self.info.prev_window_shape,
+            dst,
+        );
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+fn decode_noise(lcg: &mut Lcg, sf: f32, dst: &mut [f32]) {
+    let mut energy = 0.0;
 
-    #[test]
-    fn parses_window_sequence() {
-        assert_eq!(
-            WindowSequence::from_u8(0).unwrap(),
-            WindowSequence::OnlyLong
-        );
-        assert_eq!(
-            WindowSequence::from_u8(2).unwrap(),
-            WindowSequence::EightShort
-        );
-        assert!(WindowSequence::from_u8(4).is_err());
+    for spec in dst.iter_mut() {
+        *spec = f32::from((lcg.next_i32() >> 16) as i16);
+        energy += *spec * *spec;
     }
 
-    #[test]
-    fn counts_windows() {
-        assert_eq!(WindowSequence::OnlyLong.num_windows(), 1);
-        assert_eq!(WindowSequence::EightShort.num_windows(), 8);
-    }
+    let scale = sf / energy.sqrt();
 
-    #[test]
-    fn detects_long_windows() {
-        assert!(WindowSequence::OnlyLong.is_long());
-        assert!(!WindowSequence::EightShort.is_long());
+    for spec in dst.iter_mut() {
+        *spec *= scale;
     }
 }

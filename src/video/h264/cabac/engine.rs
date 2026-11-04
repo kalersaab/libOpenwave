@@ -39,7 +39,6 @@ impl<'a> CabacEngine<'a> {
     fn read_bit(&mut self) -> Result<u32, H264DecodeError> {
         self.bits_consumed += 1;
         if self.byte_pos >= self.data.len() {
-
             return Ok(0);
         }
         let byte = self.data[self.byte_pos];

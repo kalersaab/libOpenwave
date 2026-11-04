@@ -117,8 +117,6 @@ pub fn parse_mvhd<R: Read + Seek>(reader: &mut R) -> Mp4Result<(u32, u64)> {
     let version = read_u8(reader)?;
     skip_bytes(reader, 3)?;
 
-    eprintln!("[parse_mvhd] version: {}", version);
-
     let (timescale, duration) = if version == 1 {
         skip_bytes(reader, 16)?;
         let timescale = read_u32(reader)?;
@@ -130,11 +128,6 @@ pub fn parse_mvhd<R: Read + Seek>(reader: &mut R) -> Mp4Result<(u32, u64)> {
         let duration = read_u32(reader)? as u64;
         (timescale, duration)
     };
-
-    eprintln!(
-        "[parse_mvhd] timescale: {}, duration: {}",
-        timescale, duration
-    );
 
     skip_bytes(reader, 80)?;
 
@@ -415,7 +408,7 @@ pub fn parse_mp4a<R: Read + Seek>(reader: &mut R, size: u64) -> Mp4Result<(u32, 
     let sample_rate = read_u32(reader)?;
     let sample_rate = sample_rate >> 16;
 
-    let mut remaining = size - 8 - 6 - 2 - 8 - 2 - 2 - 4 - 4;
+    let mut remaining = size.saturating_sub(28);
     let mut audio_specific_config = Vec::new();
 
     while remaining >= 8 {
@@ -463,6 +456,22 @@ mod tests {
         let data = vec![0x12, 0x34, 0x56, 0x78];
         let mut cursor = Cursor::new(data);
         assert_eq!(read_u32(&mut cursor).unwrap(), 0x12345678);
+    }
+
+    #[test]
+    fn parses_minimal_mp4a_without_underflow() {
+        let mut data = vec![0u8; 32];
+        data[6..8].copy_from_slice(&1u16.to_be_bytes());
+        data[16..18].copy_from_slice(&2u16.to_be_bytes());
+        data[18..20].copy_from_slice(&16u16.to_be_bytes());
+        data[24..28].copy_from_slice(&(44100u32 << 16).to_be_bytes());
+
+        let mut cursor = Cursor::new(data);
+        let (rate, channels, config) = parse_mp4a(&mut cursor, 32).unwrap();
+
+        assert_eq!(rate, 44100);
+        assert_eq!(channels, 2);
+        assert!(config.is_empty());
     }
 
     #[test]
