@@ -714,6 +714,7 @@ mod tests {
             pic_init_qp_minus26: 0,
             pic_init_qs_minus26: 0,
             chroma_qp_index_offset: 0,
+            transform_8x8_mode_flag: false,
             deblocking_filter_control_present: true,
             constrained_intra_pred: false,
             redundant_pic_cnt_present: false,

@@ -38,6 +38,7 @@ pub struct Pps {
     pub pic_init_qp_minus26: i32,
     pub pic_init_qs_minus26: i32,
     pub chroma_qp_index_offset: i32,
+    pub transform_8x8_mode_flag: bool,
     pub deblocking_filter_control_present: bool,
     pub constrained_intra_pred: bool,
     pub redundant_pic_cnt_present: bool,
@@ -53,6 +54,24 @@ fn ue(r: &mut BitReader<'_>) -> Result<u32, PpsError> {
 
 fn se(r: &mut BitReader<'_>) -> Result<i32, PpsError> {
     Ok(r.read_se()?)
+}
+
+fn skip_scaling_list(r: &mut BitReader<'_>, size: usize) -> Result<(), PpsError> {
+    let mut last_scale = 8i32;
+    let mut next_scale = 8i32;
+
+    for _ in 0..size {
+        if next_scale != 0 {
+            let delta_scale = se(r)?;
+            next_scale = (last_scale + delta_scale + 256) % 256;
+        }
+
+        if next_scale != 0 {
+            last_scale = next_scale;
+        }
+    }
+
+    Ok(())
 }
 
 fn ebsp_to_rbsp(ebsp: &[u8]) -> Vec<u8> {
@@ -186,6 +205,31 @@ pub fn parse_pps(nal: &[u8]) -> Result<Pps, PpsError> {
     let deblocking_filter_control_present = flag(&mut r)?;
     let constrained_intra_pred = flag(&mut r)?;
     let redundant_pic_cnt_present = flag(&mut r)?;
+    let mut transform_8x8_mode_flag = false;
+    if r.more_rbsp_data() {
+        transform_8x8_mode_flag = flag(&mut r)?;
+        let pic_scaling_matrix_present = flag(&mut r)?;
+        if pic_scaling_matrix_present {
+            let list_count = if transform_8x8_mode_flag { 8 } else { 6 };
+            let mut custom_scaling_list = false;
+            for index in 0..list_count {
+                if flag(&mut r)? {
+                    skip_scaling_list(&mut r, if index < 6 { 16 } else { 64 })?;
+                    custom_scaling_list = true;
+                }
+            }
+            if custom_scaling_list {
+                return Err(PpsError::UnsupportedFeature);
+            }
+        }
+
+        let second_chroma_qp_index_offset = se(&mut r)?;
+        if !(-12..=12).contains(&second_chroma_qp_index_offset)
+            || second_chroma_qp_index_offset != chroma_qp_index_offset
+        {
+            return Err(PpsError::UnsupportedFeature);
+        }
+    }
 
     Ok(Pps {
         id,
@@ -202,6 +246,7 @@ pub fn parse_pps(nal: &[u8]) -> Result<Pps, PpsError> {
         pic_init_qp_minus26,
         pic_init_qs_minus26,
         chroma_qp_index_offset,
+        transform_8x8_mode_flag,
         deblocking_filter_control_present,
         constrained_intra_pred,
         redundant_pic_cnt_present,

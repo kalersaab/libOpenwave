@@ -42,6 +42,21 @@ impl<'a> BitReader<'a> {
         self.bit_pos.is_multiple_of(8)
     }
 
+    pub fn more_rbsp_data(&self) -> bool {
+        let remaining = self.bits_remaining();
+        if remaining == 0 || !self.bit_at(self.bit_pos) {
+            return remaining != 0;
+        }
+
+        (self.bit_pos + 1..self.data.len() * 8).any(|position| self.bit_at(position))
+    }
+
+    fn bit_at(&self, position: usize) -> bool {
+        let byte = self.data[position / 8];
+        let shift = 7 - (position % 8);
+        (byte >> shift) & 1 != 0
+    }
+
     pub fn skip_bits(&mut self, count: usize) -> Result<(), BitstreamError> {
         if count > self.bits_remaining() {
             return Err(BitstreamError::UnexpectedEof);
@@ -167,5 +182,14 @@ mod tests {
         let mut reader = BitReader::new(&[0; 8]);
 
         assert_eq!(reader.read_bits(33), Err(BitstreamError::InvalidBitCount));
+    }
+
+    #[test]
+    fn identifies_rbsp_trailing_bits() {
+        let mut reader = BitReader::new(&[0b1010_0000]);
+
+        assert!(reader.more_rbsp_data());
+        reader.skip_bits(2).unwrap();
+        assert!(!reader.more_rbsp_data());
     }
 }
