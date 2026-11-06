@@ -1,9 +1,15 @@
+pub mod atom;
 pub mod parser;
 pub mod reader;
+pub mod sample_table;
 pub mod types;
 
-pub use reader::Mp4Reader;
-pub use types::{Mp4Sample, Mp4Track, TrackType};
+pub use atom::{MdatBox, MoofBox, MoovBox, parse_ftyp};
+pub use reader::{Mp4PacketIter, Mp4Reader};
+pub use sample_table::SampleTiming;
+pub use types::{
+    CompositionOffset, FileType, Mp4Sample, Mp4Track, SampleTableBox, TrackType, TrexDefaults,
+};
 
 use std::io;
 

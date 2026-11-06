@@ -653,9 +653,7 @@ fn validate_decoder_configuration(
                         .iter()
                         .all(|w| w.luma.is_none() && w.chroma.is_none())
             });
-            header.num_ref_idx_l0_active == 1
-                && header.num_ref_idx_l1_active == 1
-                && header.ref_pic_list_modification_l0.is_empty()
+            header.ref_pic_list_modification_l0.is_empty()
                 && header.ref_pic_list_modification_l1.is_empty()
                 && weights_default
         }
@@ -1093,12 +1091,12 @@ fn decode_and_reconstruct_intra16x16_cabac(
     let left_has_dc = if mb_x > 0 {
         (cbp_cache[macroblock_address as usize - 1] & 0x100) != 0
     } else {
-        false
+        true
     };
     let top_has_dc = if mb_y > 0 {
         (cbp_cache[macroblock_address as usize - sps.pic_width_in_mbs as usize] & 0x100) != 0
     } else {
-        false
+        true
     };
 
     let (dc_block, dc_nnz) = decode_cabac_residual_block(
@@ -1126,12 +1124,12 @@ fn decode_and_reconstruct_intra16x16_cabac(
             let cond_a = if grid_x > 0 {
                 luma_nonzero_counts[grid_y * grid_width + grid_x - 1] > 0
             } else {
-                false
+                true
             };
             let cond_b = if grid_y > 0 {
                 luma_nonzero_counts[(grid_y - 1) * grid_width + grid_x] > 0
             } else {
-                false
+                true
             };
 
             let (block, nnz) = decode_cabac_residual_block(
@@ -1264,11 +1262,26 @@ fn decode_and_reconstruct_intra4x4_cabac(
     cbp_cache: &mut [u32],
     chroma_pred_modes: &mut [u8],
     intra4x4_modes: &mut [Intra4x4Mode],
+    transform_8x8_flags: &mut [bool],
     mb_types: &[Option<MacroblockType>],
     luma_nonzero_counts: &mut [u8],
     cb_nonzero_counts: &mut [u8],
     cr_nonzero_counts: &mut [u8],
 ) -> Result<(), H264DecodeError> {
+    let transform_8x8_flag = if pps.transform_8x8_mode_flag {
+        let left = mb_x > 0 && transform_8x8_flags[macroblock_address as usize - 1];
+        let top = mb_y > 0
+            && transform_8x8_flags[macroblock_address as usize - sps.pic_width_in_mbs as usize];
+        let context = 399 + usize::from(left) + usize::from(top);
+        engine.decode_decision(&mut contexts.states[context])? != 0
+    } else {
+        false
+    };
+    transform_8x8_flags[macroblock_address as usize] = transform_8x8_flag;
+    if transform_8x8_flag {
+        return Err(H264DecodeError::UnsupportedFeature);
+    }
+
     let mut modes = [Intra4x4Mode::Dc; 16];
     for b_idx in 0..16 {
         let b_8x8 = b_idx / 4;
@@ -1375,12 +1388,12 @@ fn decode_and_reconstruct_intra4x4_cabac(
         let cond_a = if gx > 0 {
             luma_nonzero_counts[gy * grid_width + gx - 1] > 0
         } else {
-            false
+            true
         };
         let cond_b = if gy > 0 {
             luma_nonzero_counts[(gy - 1) * grid_width + gx] > 0
         } else {
-            false
+            true
         };
 
         let (residual_levels, nnz) = if (cbp & (1 << (b_idx / 4))) != 0 {
@@ -1576,6 +1589,7 @@ fn reconstruct_slice_cabac(
     let mut cbp_cache = vec![0u32; macroblock_count as usize];
     let mut chroma_pred_modes = vec![0u8; macroblock_count as usize];
     let mut intra4x4_modes = vec![Intra4x4Mode::Dc; (macroblock_count * 16) as usize];
+    let mut transform_8x8_flags = vec![false; macroblock_count as usize];
 
     for macroblock_address in 0..macroblock_count {
         let mb_x = macroblock_address % sps.pic_width_in_mbs;
@@ -1651,6 +1665,7 @@ fn reconstruct_slice_cabac(
                     &mut cbp_cache,
                     &mut chroma_pred_modes,
                     &mut intra4x4_modes,
+                    &mut transform_8x8_flags,
                     &mb_types,
                     &mut luma_nonzero_counts,
                     &mut cb_nonzero_counts,
@@ -1715,6 +1730,7 @@ fn reconstruct_inter_slice_cabac(
 
             let mut intra4x4_modes = vec![Intra4x4Mode::Dc; (macroblock_count * 16) as usize];
             let mut chroma_pred_modes = vec![0u8; macroblock_count as usize];
+            let mut transform_8x8_flags = vec![false; macroblock_count as usize];
             let mut mb_types: Vec<Option<MacroblockType>> = vec![None; macroblock_count as usize];
             let mut luma_nonzero_counts = vec![0u8; grid_width * grid_height];
             let mut cb_nonzero_counts =
@@ -1946,6 +1962,7 @@ fn reconstruct_inter_slice_cabac(
                                 &mut cbp_cache,
                                 &mut chroma_pred_modes,
                                 &mut intra4x4_modes,
+                                &mut transform_8x8_flags,
                                 &mb_types,
                                 &mut luma_nonzero_counts,
                                 &mut cb_nonzero_counts,
@@ -2132,12 +2149,12 @@ fn decode_and_apply_inter_residual_cabac(
         let cond_a = if gx > 0 {
             luma_nonzero_counts[gy * grid_width + gx - 1] > 0
         } else {
-            false
+            true
         };
         let cond_b = if gy > 0 {
             luma_nonzero_counts[(gy - 1) * grid_width + gx] > 0
         } else {
-            false
+            true
         };
 
         let (residual_levels, nnz) = if (cbp & (1 << (b_idx / 4))) != 0 {
@@ -2401,13 +2418,13 @@ fn decode_chroma_dc_cabac(
     let cond_a = if mb_x > 0 {
         ((cbp_cache[mb_y as usize * pic_width_in_mbs as usize + mb_x as usize - 1] >> 4) & 0x3) > 0
     } else {
-        false
+        true
     };
     let cond_b = if mb_y > 0 {
         ((cbp_cache[(mb_y as usize - 1) * pic_width_in_mbs as usize + mb_x as usize] >> 4) & 0x3)
             > 0
     } else {
-        false
+        true
     };
 
     let (block_cb, nnz_cb) =
@@ -2445,12 +2462,12 @@ fn decode_chroma_ac_cabac(
         let cond_a = if gx > 0 {
             cb_nonzero_counts[gy * chroma_grid_w + gx - 1] > 0
         } else {
-            false
+            true
         };
         let cond_b = if gy > 0 {
             cb_nonzero_counts[(gy - 1) * chroma_grid_w + gx] > 0
         } else {
-            false
+            true
         };
         let (block, nnz) = decode_cabac_residual_block(
             engine,
@@ -2480,12 +2497,12 @@ fn decode_chroma_ac_cabac(
         let cond_a = if gx > 0 {
             cr_nonzero_counts[gy * chroma_grid_w + gx - 1] > 0
         } else {
-            false
+            true
         };
         let cond_b = if gy > 0 {
             cr_nonzero_counts[(gy - 1) * chroma_grid_w + gx] > 0
         } else {
-            false
+            true
         };
         let (block, nnz) = decode_cabac_residual_block(
             engine,
